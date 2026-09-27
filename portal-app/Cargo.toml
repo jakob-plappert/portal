@@ -1,0 +1,13 @@
+[package]
+name = "portal"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+slint = "1.18"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[build-dependencies]
+slint-build = "1.18"

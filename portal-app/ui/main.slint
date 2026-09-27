@@ -1,0 +1,649 @@
+import {
+    Button,
+    LineEdit,
+    ScrollView
+} from "std-widgets.slint";
+
+export struct ProjectListItem {
+    name: string,
+    folder-name: string,
+}
+
+export struct ShotListItem {
+    number: int,
+    title: string,
+    brief: string,
+    label: string,
+}
+
+export component MainWindow inherits Window {
+    callback create-project(string);
+    callback create-shot(string, string);
+    callback open-project(string);
+    callback refresh-projects();
+
+    in-out property <bool>
+        new-project-dialog-open: false;
+
+    in-out property <bool>
+        new-shot-dialog-open: false;
+
+    in-out property <bool>
+        open-project-dialog-open: false;
+
+    in-out property <bool>
+        project-open: false;
+
+    in-out property <string>
+        current-project-name: "";
+
+    in-out property <int>
+        current-shot-number: 0;
+
+    in-out property <string>
+        current-shot-title: "";
+
+    in-out property <string>
+        current-shot-brief: "";
+
+    in-out property <string>
+        project-error: "";
+
+    in-out property <string>
+        shot-error: "";
+
+    in-out property <[ProjectListItem]>
+        available-projects: [];
+
+    in-out property <[ShotListItem]>
+        shots: [];
+
+    private property <string>
+        new-project-name: "";
+
+    private property <string>
+        new-shot-title: "";
+
+    private property <string>
+        new-shot-brief: "";
+
+    title: "Portal";
+
+    width: 1280px;
+    height: 800px;
+
+    min-width: 900px;
+    min-height: 600px;
+
+    background: #17191d;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            width: 220px;
+            background: #202329;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                Text {
+                    text: "PORTAL";
+                    color: #f5f5f5;
+                    font-size: 24px;
+                    font-weight: 700;
+                }
+
+                Rectangle {
+                    height: 14px;
+                }
+
+                Button {
+                    text: "Nexus";
+                }
+
+                Button {
+                    text: "Compute";
+                }
+
+                Button {
+                    text: "Settings";
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                Text {
+                    text: "0.3.0";
+                    color: #737982;
+                    font-size: 12px;
+                }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            background: #17191d;
+
+            VerticalLayout {
+                padding: 28px;
+                spacing: 12px;
+
+                Text {
+                    text: "Nexus";
+                    color: #f5f5f5;
+                    font-size: 30px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "AI Production Studio";
+                    color: #9ca3af;
+                    font-size: 15px;
+                }
+
+                Rectangle {
+                    height: 10px;
+                }
+
+                if !root.project-open: Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    background: #111318;
+                    border-radius: 8px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 12px;
+
+                        Text {
+                            text: "No project open";
+                            color: #d1d5db;
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Create a new project or open an existing one.";
+                            color: #737982;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 8px;
+                        }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 10px;
+
+                            Button {
+                                text: "New Project";
+
+                                clicked => {
+                                    root.new-project-name = "";
+                                    root.project-error = "";
+                                    root.new-project-dialog-open = true;
+                                }
+                            }
+
+                            Button {
+                                text: "Open Project";
+
+                                clicked => {
+                                    root.project-error = "";
+                                    root.refresh-projects();
+                                    root.open-project-dialog-open = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.project-open: Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    background: #111318;
+                    border-radius: 8px;
+
+                    HorizontalLayout {
+                        spacing: 0px;
+
+                        Rectangle {
+                            width: 300px;
+                            background: #181b20;
+
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 10px;
+
+                                Text {
+                                    text: root.current-project-name;
+                                    color: #f5f5f5;
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Project Shots";
+                                    color: #737982;
+                                    font-size: 12px;
+                                }
+
+                                Rectangle {
+                                    height: 4px;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Button {
+                                        text: "+ Shot";
+
+                                        clicked => {
+                                            root.new-shot-title = "";
+                                            root.new-shot-brief = "";
+                                            root.shot-error = "";
+                                            root.new-shot-dialog-open = true;
+                                        }
+                                    }
+
+                                    Button {
+                                        text: "Projects";
+
+                                        clicked => {
+                                            root.project-error = "";
+                                            root.refresh-projects();
+                                            root.open-project-dialog-open = true;
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 6px;
+                                }
+
+                                Text {
+                                    text: "SHOTS";
+                                    color: #737982;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+
+                                if root.shots.length == 0: Text {
+                                    text: "No shots yet.";
+                                    color: #737982;
+                                    font-size: 13px;
+                                }
+
+                                ScrollView {
+                                    horizontal-stretch: 1;
+                                    vertical-stretch: 1;
+
+                                    VerticalLayout {
+                                        spacing: 6px;
+
+                                        for shot in root.shots: Button {
+                                            text: shot.label;
+
+                                            clicked => {
+                                                root.current-shot-number = shot.number;
+                                                root.current-shot-title = shot.title;
+                                                root.current-shot-brief = shot.brief;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 1px;
+                            background: #2c3037;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: #111318;
+
+                            VerticalLayout {
+                                padding: 28px;
+                                spacing: 14px;
+
+                                if root.current-shot-number == 0: Text {
+                                    text: "No shot selected";
+                                    color: #d1d5db;
+                                    font-size: 20px;
+                                }
+
+                                if root.current-shot-number == 0: Text {
+                                    text: "Create a shot or select one from the project browser.";
+                                    color: #737982;
+                                    font-size: 14px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.current-shot-number != 0: Text {
+                                    text: "SELECTED SHOT";
+                                    color: #737982;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                }
+
+                                if root.current-shot-number != 0: Text {
+                                    text: root.current-shot-title;
+                                    color: #f5f5f5;
+                                    font-size: 26px;
+                                    font-weight: 700;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.current-shot-number != 0: Rectangle {
+                                    height: 12px;
+                                }
+
+                                if root.current-shot-number != 0: Text {
+                                    text: "BRIEF";
+                                    color: #737982;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+
+                                if root.current-shot-number != 0: Text {
+                                    text: root.current-shot-brief;
+                                    color: #c6cbd2;
+                                    font-size: 15px;
+                                    wrap: word-wrap;
+                                }
+
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                }
+
+                                if root.current-shot-number != 0: Text {
+                                    text: "Generation tools will appear here next.";
+                                    color: #555b64;
+                                    font-size: 12px;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.new-project-dialog-open: Rectangle {
+        x: 0px;
+        y: 0px;
+
+        width: parent.width;
+        height: parent.height;
+
+        background: #aa000000;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: 420px;
+            height: 240px;
+
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            background: #24272e;
+            border-radius: 8px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                Text {
+                    text: "New Project";
+                    color: #f5f5f5;
+                    font-size: 22px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Project name";
+                    color: #a5abb5;
+                    font-size: 13px;
+                }
+
+                LineEdit {
+                    text <=> root.new-project-name;
+                    placeholder-text: "My Series";
+                }
+
+                if root.project-error != "": Text {
+                    text: root.project-error;
+                    color: #ff7b7b;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    Button {
+                        text: "Cancel";
+
+                        clicked => {
+                            root.new-project-dialog-open = false;
+                            root.project-error = "";
+                        }
+                    }
+
+                    Button {
+                        text: "Create";
+
+                        clicked => {
+                            root.create-project(
+                                root.new-project-name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.new-shot-dialog-open: Rectangle {
+        x: 0px;
+        y: 0px;
+
+        width: parent.width;
+        height: parent.height;
+
+        background: #aa000000;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 330px;
+
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            background: #24272e;
+            border-radius: 8px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "New Shot";
+                    color: #f5f5f5;
+                    font-size: 22px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Title";
+                    color: #a5abb5;
+                    font-size: 13px;
+                }
+
+                LineEdit {
+                    text <=> root.new-shot-title;
+                    placeholder-text: "Laura enters the kitchen";
+                }
+
+                Text {
+                    text: "Brief";
+                    color: #a5abb5;
+                    font-size: 13px;
+                }
+
+                LineEdit {
+                    text <=> root.new-shot-brief;
+                    placeholder-text: "Describe what happens...";
+                }
+
+                if root.shot-error != "": Text {
+                    text: root.shot-error;
+                    color: #ff7b7b;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 10px;
+
+                    Button {
+                        text: "Cancel";
+
+                        clicked => {
+                            root.new-shot-dialog-open = false;
+                            root.shot-error = "";
+                        }
+                    }
+
+                    Button {
+                        text: "Create";
+
+                        clicked => {
+                            root.create-shot(
+                                root.new-shot-title,
+                                root.new-shot-brief
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.open-project-dialog-open: Rectangle {
+        x: 0px;
+        y: 0px;
+
+        width: parent.width;
+        height: parent.height;
+
+        background: #aa000000;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: 500px;
+            height: 440px;
+
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+
+            background: #24272e;
+            border-radius: 8px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 14px;
+
+                Text {
+                    text: "Open Project";
+                    color: #f5f5f5;
+                    font-size: 22px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Projects in portaldata/projects";
+                    color: #737982;
+                    font-size: 13px;
+                }
+
+                if root.project-error != "": Text {
+                    text: root.project-error;
+                    color: #ff7b7b;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                if root.available-projects.length == 0: Text {
+                    text: "No projects found.";
+                    color: #737982;
+                    font-size: 14px;
+                }
+
+                ScrollView {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        for project in root.available-projects: Button {
+                            text: project.name;
+
+                            clicked => {
+                                root.open-project(
+                                    project.folder-name
+                                );
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+
+                    Button {
+                        text: "Cancel";
+
+                        clicked => {
+                            root.open-project-dialog-open = false;
+                            root.project-error = "";
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
