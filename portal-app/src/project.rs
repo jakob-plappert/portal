@@ -3,6 +3,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+// `Project` is the application's runtime representation. It owns its strings
+// and `PathBuf`, so it can safely outlive the temporary directory entries and
+// TOML text from which it was constructed.
 #[derive(Debug, Clone)]
 pub struct Project {
     pub name: String,
@@ -10,6 +13,9 @@ pub struct Project {
     pub path: PathBuf,
 }
 
+// Serde's derive macros generate the serialization/deserialization code that
+// maps this deliberately small disk schema to and from `project.toml`. Keeping
+// it separate avoids persisting runtime-only details such as an absolute path.
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectFile {
     name: String,
@@ -18,12 +24,17 @@ struct ProjectFile {
 
 impl Project {
     pub fn create(name: &str) -> Result<Self, String> {
+        // The caller lends us `&str`; `trim()` returns another borrowed slice
+        // rather than allocating. We create owned strings only for data the
+        // returned Project and its TOML file must retain.
         let name = name.trim();
 
         if name.is_empty() {
             return Err(String::from("Project name must not be empty."));
         }
 
+        // `?` propagates the validation error immediately. On success it
+        // unwraps the folder name from `Result<String, String>`.
         let folder_name = project_folder_name(name)?;
 
         let projects_dir = projects_dir();
@@ -33,6 +44,8 @@ impl Project {
             return Err(format!("Project '{name}' already exists."));
         }
 
+        // Filesystem errors are converted into user-facing strings. The final
+        // `?` returns that error to the caller instead of panicking.
         fs::create_dir_all(&project_dir)
             .map_err(|error| format!("Could not create project directory: {error}"))?;
 
@@ -43,6 +56,8 @@ impl Project {
             version: 1,
         };
 
+        // Serde supplies ProjectFile's `Serialize` implementation; `toml`
+        // uses it to produce the stable on-disk representation.
         let content = toml::to_string_pretty(&project_file)
             .map_err(|error| format!("Could not serialize project.toml: {error}"))?;
 
@@ -81,6 +96,9 @@ impl Project {
 
         let mut projects = Vec::new();
 
+        // `read_dir` yields a `Result` for every entry because a directory can
+        // change or become unreadable during iteration. Propagating an error
+        // avoids silently presenting an incomplete project list.
         for entry in entries {
             let entry = entry
                 .map_err(|error| format!("Could not read project directory entry: {error}"))?;
@@ -89,6 +107,8 @@ impl Project {
                 .file_type()
                 .map_err(|error| format!("Could not inspect project entry: {error}"))?;
 
+            // Non-project files and directories without project.toml are
+            // ignored so portaldata may contain other runtime content.
             if !file_type.is_dir() {
                 continue;
             }
@@ -120,6 +140,8 @@ impl Project {
             format!("Could not read '{}': {error}", project_file_path.display())
         })?;
 
+        // The explicit type tells serde which schema to deserialize. Invalid
+        // TOML remains a recoverable `Result::Err` with its path attached.
         let project_file = toml::from_str::<ProjectFile>(&content).map_err(|error| {
             format!("Could not parse '{}': {error}", project_file_path.display())
         })?;
@@ -133,6 +155,8 @@ impl Project {
 }
 
 fn create_project_directories(project_dir: &Path) -> Result<(), String> {
+    // Borrowing `&Path` lets the caller keep ownership of its PathBuf. Each
+    // `join` creates the owned child path needed by the filesystem operation.
     for directory in [
         "characters",
         "locations",
@@ -152,10 +176,16 @@ fn projects_dir() -> PathBuf {
 }
 
 fn portal_data_dir() -> PathBuf {
+    // `std::env::var` returns `Result` because a variable may be missing or not
+    // valid Unicode. A valid override is useful for development and tests;
+    // either error falls back to the repository-local runtime directory.
     if let Ok(path) = std::env::var("PORTAL_DATA_DIR") {
         return PathBuf::from(path);
     }
 
+    // `env!` embeds Cargo's manifest directory at compile time. The parent is
+    // an invariant of this repository layout, so a clear `expect` message is
+    // preferable to carrying an impossible `Option` through the application.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("portal-app must have a parent directory")
@@ -163,6 +193,9 @@ fn portal_data_dir() -> PathBuf {
 }
 
 fn validate_project_folder_name(folder_name: &str) -> Result<(), String> {
+    // Accept exactly one normal path component. Pattern matching rejects
+    // absolute paths, `..`, and nested paths before joining user-controlled
+    // input beneath portaldata/projects.
     let mut components = Path::new(folder_name).components();
 
     match (components.next(), components.next()) {
@@ -173,6 +206,9 @@ fn validate_project_folder_name(folder_name: &str) -> Result<(), String> {
 }
 
 fn project_folder_name(name: &str) -> Result<String, String> {
+    // Build a filesystem-friendly owned slug. The intermediate split slices
+    // borrow from the collected String only for this expression; the final
+    // `join` returns a new independent String.
     let folder_name = name
         .trim()
         .to_lowercase()

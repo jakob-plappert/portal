@@ -69,8 +69,10 @@ export component MainWindow inherits Window {
 
     title: "Portal";
 
-    width: 1280px;
-    height: 800px;
+    // A preferred size gives the window its intended initial dimensions while
+    // still allowing the separate minimum constraints below.
+    preferred-width: 1280px;
+    preferred-height: 800px;
 
     min-width: 900px;
     min-height: 600px;

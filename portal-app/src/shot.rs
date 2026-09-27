@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::project::Project;
 
+// Serde derives both directions because a Shot is the complete TOML schema:
+// creation serializes it, while opening a project deserializes it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shot {
     pub number: u32,
@@ -14,6 +16,9 @@ pub struct Shot {
 
 impl Shot {
     pub fn create(project: &Project, title: &str, brief: &str) -> Result<Self, String> {
+        // All arguments are borrowed, so creating a shot does not take the
+        // Project or callback strings away from their owners. The returned
+        // Shot allocates owned strings for data that must survive this call.
         let title = title.trim();
         let brief = brief.trim();
 
@@ -26,6 +31,8 @@ impl Shot {
         fs::create_dir_all(&shots_dir)
             .map_err(|error| format!("Could not create shots directory: {error}"))?;
 
+        // A failure to inspect existing shots must stop creation; `?`
+        // propagates that `Err(String)` and unwraps the number on success.
         let number = next_shot_number(&shots_dir)?;
 
         let shot = Self {
@@ -34,6 +41,8 @@ impl Shot {
             brief: brief.to_string(),
         };
 
+        // The derived `Serialize` implementation lets the TOML crate encode
+        // the borrowed Shot without consuming it, so it can still be returned.
         let serialized = toml::to_string_pretty(&shot)
             .map_err(|error| format!("Could not serialize shot: {error}"))?;
 
@@ -57,6 +66,9 @@ impl Shot {
 
         let mut shots = Vec::new();
 
+        // Directory iteration and file parsing are fallible operations. Each
+        // error is enriched with context and propagated rather than producing
+        // a partially loaded project.
         for entry in entries {
             let entry = entry.map_err(|error| format!("Could not read shot entry: {error}"))?;
 
@@ -66,6 +78,8 @@ impl Shot {
                 continue;
             }
 
+            // Both "has an extension" and "extension is valid UTF-8" are
+            // optional, so the composed result is `Option<&str>`.
             let extension = path.extension().and_then(|extension| extension.to_str());
 
             if extension != Some("toml") {
@@ -75,6 +89,8 @@ impl Shot {
             let content = fs::read_to_string(&path)
                 .map_err(|error| format!("Could not read '{}': {error}", path.display()))?;
 
+            // Serde's generated `Deserialize` implementation reconstructs an
+            // owned Shot from the temporary TOML string.
             let shot = toml::from_str::<Shot>(&content)
                 .map_err(|error| format!("Could not parse '{}': {error}", path.display()))?;
 
@@ -93,6 +109,8 @@ fn next_shot_number(shots_dir: &Path) -> Result<u32, String> {
 
     let mut highest_number = 0;
 
+    // Only filenames shaped like `shot_<u32>` participate. `let-else` keeps
+    // each rejected case local and leaves the successful path unindented.
     for entry in entries {
         let entry = entry.map_err(|error| format!("Could not read shot entry: {error}"))?;
 
@@ -110,6 +128,8 @@ fn next_shot_number(shots_dir: &Path) -> Result<u32, String> {
             continue;
         };
 
+        // This pattern match deliberately ignores parse errors from unrelated
+        // files; unlike filesystem errors above, they do not prevent scanning.
         let Ok(number) = number_text.parse::<u32>() else {
             continue;
         };
