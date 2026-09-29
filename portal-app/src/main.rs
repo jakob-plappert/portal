@@ -1,4 +1,5 @@
 mod app_state;
+mod generation;
 mod project;
 mod shot;
 
@@ -6,6 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use app_state::AppState;
+use generation::GenerationSpec;
 use project::Project;
 use shot::Shot;
 
@@ -38,6 +40,8 @@ fn main() -> Result<(), slint::PlatformError> {
     setup_refresh_projects(&window);
 
     setup_create_shot(&window, Rc::clone(&state));
+
+    setup_prepare_generation(&window, Rc::clone(&state));
 
     if let Err(error) = refresh_project_list(&window) {
         eprintln!("Could not load project list: {error}");
@@ -246,6 +250,55 @@ fn setup_create_shot(window: &MainWindow, state: Rc<RefCell<AppState>>) {
     });
 }
 
+fn setup_prepare_generation(window: &MainWindow, state: Rc<RefCell<AppState>>) {
+    let weak_window = window.as_weak();
+
+    window.on_prepare_generation(move |shot_number| {
+        let spec = {
+            // `borrow()` gives temporary shared access through the RefCell.
+            // `iter().find(...)` borrows each Shot in turn and returns the first
+            // one whose number matches, or `None` when no such shot exists.
+            let state = state.borrow();
+
+            state
+                .shots
+                .iter()
+                .find(|shot| shot.number == shot_number as u32)
+                .map(GenerationSpec::from_shot)
+        };
+
+        // The block above ends the RefCell borrow before any Slint property is
+        // changed. Keeping state borrows narrow avoids a runtime borrow panic
+        // if a UI update synchronously causes another callback to inspect state.
+        let Some(window) = weak_window.upgrade() else {
+            return;
+        };
+
+        let Some(spec) = spec else {
+            clear_generation_preview(&window);
+            window.set_generation_error(
+                format!("Could not prepare generation: shot {shot_number} was not found.").into(),
+            );
+            return;
+        };
+
+        // Rust owns the domain values and explicitly converts them into the
+        // strings the Slint view needs. In particular, `None` means "Auto",
+        // while a future `Some(seed)` contains a number to display.
+        let resolution = format!("{} × {}", spec.width, spec.height);
+        let seed = match spec.seed {
+            Some(seed) => seed.to_string(),
+            None => String::from("Auto"),
+        };
+
+        window.set_generation_prompt(spec.prompt.into());
+        window.set_generation_resolution(resolution.into());
+        window.set_generation_seed(seed.into());
+        window.set_generation_error(String::new().into());
+        window.set_generation_ready(true);
+    });
+}
+
 fn refresh_project_list(window: &MainWindow) -> Result<(), String> {
     // Here `?` returns the user-facing error `String` to the caller if listing
     // fails; otherwise `projects` receives the successful vector.
@@ -323,6 +376,8 @@ fn set_shot_model(window: &MainWindow, shots: &[Shot]) {
 }
 
 fn select_shot(window: &MainWindow, shot: &Shot) {
+    clear_generation_preview(window);
+
     window.set_current_shot_number(shot.number as i32);
 
     window.set_current_shot_title(shot.title.clone().into());
@@ -331,9 +386,19 @@ fn select_shot(window: &MainWindow, shot: &Shot) {
 }
 
 fn clear_selected_shot(window: &MainWindow) {
+    clear_generation_preview(window);
+
     window.set_current_shot_number(0);
 
     window.set_current_shot_title(String::new().into());
 
     window.set_current_shot_brief(String::new().into());
+}
+
+fn clear_generation_preview(window: &MainWindow) {
+    window.set_generation_ready(false);
+    window.set_generation_prompt(String::new().into());
+    window.set_generation_resolution(String::new().into());
+    window.set_generation_seed(String::new().into());
+    window.set_generation_error(String::new().into());
 }

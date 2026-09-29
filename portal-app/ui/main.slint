@@ -20,6 +20,7 @@ export component MainWindow inherits Window {
     callback create-project(string);
     callback create-shot(string, string);
     callback open-project(string);
+    callback prepare-generation(int);
     callback refresh-projects();
 
     in-out property <bool>
@@ -52,6 +53,21 @@ export component MainWindow inherits Window {
     in-out property <string>
         shot-error: "";
 
+    in-out property <bool>
+        generation-ready: false;
+
+    in-out property <string>
+        generation-prompt: "";
+
+    in-out property <string>
+        generation-resolution: "";
+
+    in-out property <string>
+        generation-seed: "";
+
+    in-out property <string>
+        generation-error: "";
+
     in-out property <[ProjectListItem]>
         available-projects: [];
 
@@ -66,6 +82,14 @@ export component MainWindow inherits Window {
 
     private property <string>
         new-shot-brief: "";
+
+    function clear-generation-preview() {
+        root.generation-ready = false;
+        root.generation-prompt = "";
+        root.generation-resolution = "";
+        root.generation-seed = "";
+        root.generation-error = "";
+    }
 
     title: "Portal";
 
@@ -118,7 +142,7 @@ export component MainWindow inherits Window {
                 }
 
                 Text {
-                    text: "0.3.0";
+                    text: "0.4.0";
                     color: #737982;
                     font-size: 12px;
                 }
@@ -294,6 +318,7 @@ export component MainWindow inherits Window {
                                             text: shot.label;
 
                                             clicked => {
+                                                root.clear-generation-preview();
                                                 root.current-shot-number = shot.number;
                                                 root.current-shot-title = shot.title;
                                                 root.current-shot-brief = shot.brief;
@@ -363,14 +388,112 @@ export component MainWindow inherits Window {
                                     wrap: word-wrap;
                                 }
 
-                                Rectangle {
-                                    vertical-stretch: 1;
+                                if root.current-shot-number != 0: Rectangle {
+                                    height: 1px;
+                                    background: #2c3037;
                                 }
 
                                 if root.current-shot-number != 0: Text {
-                                    text: "Generation tools will appear here next.";
-                                    color: #555b64;
+                                    text: "GENERATION";
+                                    color: #737982;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+
+                                if root.current-shot-number != 0: Button {
+                                    text: "Prepare Generation";
+
+                                    clicked => {
+                                        root.prepare-generation(root.current-shot-number);
+                                    }
+                                }
+
+                                if root.current-shot-number != 0: Text {
+                                    text: "Specification preview only — no image has been generated.";
+                                    color: #737982;
                                     font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.generation-error != "": Text {
+                                    text: root.generation-error;
+                                    color: #ff7b7b;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.generation-ready: Text {
+                                    text: "Prompt";
+                                    color: #737982;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+
+                                if root.generation-ready: Text {
+                                    text: root.generation-prompt;
+                                    color: #f5f5f5;
+                                    font-size: 14px;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.generation-ready: HorizontalLayout {
+                                    spacing: 48px;
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: "Resolution";
+                                            color: #737982;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                        }
+
+                                        Text {
+                                            text: root.generation-resolution;
+                                            color: #c6cbd2;
+                                            font-size: 14px;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: "Seed";
+                                            color: #737982;
+                                            font-size: 11px;
+                                            font-weight: 700;
+                                        }
+
+                                        Text {
+                                            text: root.generation-seed;
+                                            color: #c6cbd2;
+                                            font-size: 14px;
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                if root.generation-ready: Text {
+                                    text: "Status";
+                                    color: #737982;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                }
+
+                                if root.generation-ready: Text {
+                                    text: "Generation specification ready.\nImage generation with ComfyUI comes next.";
+                                    color: #9ca3af;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+
+                                Rectangle {
+                                    vertical-stretch: 1;
                                 }
                             }
                         }
