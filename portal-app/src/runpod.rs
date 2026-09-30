@@ -29,6 +29,19 @@ pub struct RunPodJobState {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueRequestMethod {
+    Get,
+    Post,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueueRequest {
+    method: QueueRequestMethod,
+    url: String,
+    action: &'static str,
+}
+
 impl RunPodClient {
     pub fn new(api_key: String) -> Result<Self, String> {
         if api_key.trim().is_empty() {
@@ -62,32 +75,64 @@ impl RunPodClient {
     }
 
     pub fn poll_job(&self, endpoint_id: &str, job_id: &str) -> Result<RunPodJobState, String> {
-        self.job_action(endpoint_id, job_id, "status")
+        let request = self.status_request(endpoint_id, job_id)?;
+        self.execute_queue_request(request)
     }
 
     pub fn cancel_job(&self, endpoint_id: &str, job_id: &str) -> Result<RunPodJobState, String> {
-        self.job_action(endpoint_id, job_id, "cancel")
+        let request = self.cancel_request(endpoint_id, job_id)?;
+        self.execute_queue_request(request)
     }
 
-    fn job_action(
+    fn status_request(&self, endpoint_id: &str, job_id: &str) -> Result<QueueRequest, String> {
+        self.queue_request(endpoint_id, job_id, "status", QueueRequestMethod::Get)
+    }
+
+    fn cancel_request(&self, endpoint_id: &str, job_id: &str) -> Result<QueueRequest, String> {
+        self.queue_request(endpoint_id, job_id, "cancel", QueueRequestMethod::Post)
+    }
+
+    fn queue_request(
         &self,
         endpoint_id: &str,
         job_id: &str,
-        action: &str,
-    ) -> Result<RunPodJobState, String> {
+        action: &'static str,
+        method: QueueRequestMethod,
+    ) -> Result<QueueRequest, String> {
         self.validate_endpoint(endpoint_id)?;
         if job_id.trim().is_empty() {
             return Err(String::from("RunPod job ID must not be empty."));
         }
-        let url = format!("{}/{}/{}/{}", self.base_url, endpoint_id, action, job_id);
-        let mut response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .call()
-            .map_err(|error| format!("RunPod {action} request failed: {error}"))?;
+        Ok(QueueRequest {
+            method,
+            url: format!("{}/{}/{}/{}", self.base_url, endpoint_id, action, job_id),
+            action,
+        })
+    }
+
+    fn execute_queue_request(&self, request: QueueRequest) -> Result<RunPodJobState, String> {
+        // Status is a read and uses GET. Cancellation changes remote state and
+        // must use POST. Keeping the method in the tested request description
+        // prevents these similarly shaped URLs from silently sharing GET.
+        let response = match request.method {
+            QueueRequestMethod::Get => ureq::get(&request.url)
+                .header("Authorization", &format!("Bearer {}", self.api_key))
+                .call(),
+            QueueRequestMethod::Post => ureq::post(&request.url)
+                .header("Authorization", &format!("Bearer {}", self.api_key))
+                .send_empty(),
+        };
+        let mut response = response
+            .map_err(|error| format!("RunPod {} request failed: {error}", request.action))?;
         response
             .body_mut()
             .read_json::<RunPodJobState>()
-            .map_err(|error| format!("RunPod returned an invalid {action} response: {error}"))
+            .map_err(|error| {
+                format!(
+                    "RunPod returned an invalid {} response: {error}",
+                    request.action
+                )
+            })
     }
 
     fn validate_endpoint(&self, endpoint_id: &str) -> Result<(), String> {
@@ -191,5 +236,35 @@ mod tests {
             .poll_job("bad/endpoint", "job")
             .expect_err("unsafe endpoint should be rejected");
         assert!(error.contains("invalid characters"));
+    }
+
+    #[test]
+    fn status_request_uses_get_and_status_path() {
+        let client = RunPodClient::new(String::from("not-a-real-key"))
+            .expect("non-empty key should construct client");
+        let request = client
+            .status_request("image-endpoint", "job-123")
+            .expect("request should be constructed without network access");
+
+        assert_eq!(request.method, QueueRequestMethod::Get);
+        assert_eq!(
+            request.url,
+            "https://api.runpod.ai/v2/image-endpoint/status/job-123"
+        );
+    }
+
+    #[test]
+    fn cancel_request_uses_post_and_cancel_path() {
+        let client = RunPodClient::new(String::from("not-a-real-key"))
+            .expect("non-empty key should construct client");
+        let request = client
+            .cancel_request("video-endpoint", "job-456")
+            .expect("request should be constructed without network access");
+
+        assert_eq!(request.method, QueueRequestMethod::Post);
+        assert_eq!(
+            request.url,
+            "https://api.runpod.ai/v2/video-endpoint/cancel/job-456"
+        );
     }
 }

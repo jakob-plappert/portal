@@ -601,7 +601,7 @@ fn refresh_jobs(window: &MainWindow, store: &crate::storage::NexusStore) -> Resu
 }
 
 fn refresh_settings(window: &MainWindow, state: &AppState) {
-    window.set_storage_path(state.paths.root().display().to_string().into());
+    window.set_storage_path(state.paths.nexus_dir().display().to_string().into());
     window.set_prompt_endpoint_id(state.settings.runpod.prompt_endpoint_id.clone().into());
     window.set_image_endpoint_id(state.settings.runpod.image_endpoint_id.clone().into());
     window.set_video_endpoint_id(state.settings.runpod.video_endpoint_id.clone().into());

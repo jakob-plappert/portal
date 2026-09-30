@@ -322,7 +322,7 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         padding: 22px; spacing: 8px;
                         Heading { text: "Local Media Library"; }
-                        Label { text: "Files stay under portaldata; SQLite stores metadata only."; }
+                        Label { text: "Files stay under portaldata/apps/nexus; SQLite stores metadata only."; }
                         HorizontalLayout {
                             LineEdit { horizontal-stretch: 1; text <=> root.import-path; placeholder-text: "/absolute/path/to/file.png"; }
                             ComboBox { width: 105px; model: ["Image", "Video", "Audio"]; current-index <=> root.import-kind-index; }
@@ -404,7 +404,7 @@ export component MainWindow inherits Window {
                     Label { text: "No fake assistant response is generated when the compiler is unavailable."; wrap: word-wrap; }
                     Rectangle { height: 10px; }
                     Text { text: "Local Storage"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
-                    Text { text: root.storage-path; color: #aeb4be; wrap: word-wrap; }
+                    Text { text: "Nexus app data: " + root.storage-path; color: #aeb4be; wrap: word-wrap; }
                     Button { text: "Save Settings"; clicked => { root.save-settings(root.api-key-entry, root.prompt-endpoint-id, root.image-endpoint-id, root.video-endpoint-id, root.prompt-compiler-index == 0 ? "manual" : root.prompt-compiler-index == 1 ? "local_http" : "runpod", root.local-http-url); root.api-key-entry = ""; } }
                     if root.settings-status != "": Text { text: root.settings-status; color: #aeb9c9; wrap: word-wrap; }
                 }

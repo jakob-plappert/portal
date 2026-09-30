@@ -2,7 +2,7 @@
 
 Nexus treats RunPod as temporary compute. Portal owns projects, conversations,
 characters, job history, and media metadata locally. Every completed remote
-artifact must be downloaded into `portaldata/nexus/media`, registered in the
+artifact must be downloaded into `portaldata/apps/nexus/media`, registered in the
 local SQLite database, and displayed from that local copy. A remote artifact
 can be cleaned up after successful receipt.
 
@@ -41,6 +41,24 @@ library rather than treating provider storage as permanent.
 
 ## Storage responsibilities
 
+Portal gives each internal app a private Android-like directory under
+`portaldata/apps/<app-id>`. Nexus owns `portaldata/apps/nexus`; future apps such
+as Spybotics receive separate directories. `portaldata/shared` is reserved for
+data intentionally shared across applications rather than being used as an
+implicit dumping ground.
+
+```text
+portaldata/
+  apps/
+    nexus/
+      nexus.sqlite3
+      settings.toml
+      media/{images,videos,audio}/
+      imports/
+      temp/
+  shared/
+```
+
 The network volume should mainly contain:
 
 - model weights;
@@ -49,7 +67,7 @@ The network volume should mainly contain:
 - temporary workflow assets when necessary.
 
 Permanent generated images, videos, and audio belong on the user's local
-computer under `portaldata/nexus/media`. SQLite contains metadata and relative
+computer under `portaldata/apps/nexus/media`. SQLite contains metadata and relative
 paths only; it does not contain media BLOBs.
 
 ## Stable future worker contract
