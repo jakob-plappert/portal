@@ -1,7 +1,17 @@
 mod app_state;
+mod branding;
 mod generation;
+mod media_library;
+mod model_catalog;
+mod nexus_ui;
+mod paths;
 mod project;
+mod prompt;
+mod runpod;
+mod settings;
 mod shot;
+mod storage;
+mod worker_contract;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,17 +28,20 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 // `ShotListItem` come from even though no handwritten Rust declares them.
 slint::include_modules!();
 
-fn main() -> Result<(), slint::PlatformError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `?` unwraps the successful `MainWindow` or returns its `PlatformError`
     // from `main` immediately. That keeps startup failure handling explicit
     // without a panic.
     let window = MainWindow::new()?;
 
+    window.set_nexus_display_name(branding::NEXUS_DISPLAY_NAME.into());
+    window.set_nexus_subtitle(branding::NEXUS_SUBTITLE.into());
+
     // Slint callbacks are retained by the window and all need access to the
     // same state. `Rc` provides shared ownership on this single UI thread,
     // while `RefCell` provides interior mutability: immutable `Rc` handles can
     // request checked mutable borrows at runtime.
-    let state = Rc::new(RefCell::new(AppState::default()));
+    let state = Rc::new(RefCell::new(AppState::initialize()?));
 
     // `Rc::clone` clones only the inexpensive reference-counted handle, not
     // the `AppState`. Each `move` callback below receives one owning handle to
@@ -43,11 +56,15 @@ fn main() -> Result<(), slint::PlatformError> {
 
     setup_prepare_generation(&window, Rc::clone(&state));
 
+    // Nexus wiring is kept in its own concrete module so the existing
+    // Project -> Shot workflow remains readable and independently teachable.
+    nexus_ui::setup(&window, Rc::clone(&state))?;
+
     if let Err(error) = refresh_project_list(&window) {
         eprintln!("Could not load project list: {error}");
     }
 
-    window.run()
+    Ok(window.run()?)
 }
 
 fn setup_create_project(window: &MainWindow, state: Rc<RefCell<AppState>>) {

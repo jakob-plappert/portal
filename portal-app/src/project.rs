@@ -128,7 +128,7 @@ impl Project {
             projects.push(project);
         }
 
-        projects.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        projects.sort_by_key(|project| project.name.to_lowercase());
 
         Ok(projects)
     }
