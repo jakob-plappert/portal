@@ -58,6 +58,10 @@ impl PortalPaths {
         self.nexus_dir().join("settings.toml")
     }
 
+    pub fn infrastructure_path(&self) -> PathBuf {
+        self.nexus_dir().join("infrastructure.toml")
+    }
+
     pub fn media_dir(&self) -> PathBuf {
         self.nexus_dir().join("media")
     }

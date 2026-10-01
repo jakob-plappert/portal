@@ -29,6 +29,9 @@ export component MainWindow inherits Window {
     callback select-reference-media(string);
     callback submit-generation(string, string, string, string, string, string, string);
     callback save-settings(string, string, string, string, string, string);
+    callback plan-infrastructure(string);
+    callback apply-infrastructure();
+    callback check-runpod();
 
     in-out property <int> active-app: 1;
     in-out property <int> nexus-tab: 0;
@@ -73,6 +76,11 @@ export component MainWindow inherits Window {
     in-out property <string> video-endpoint-id: "";
     in-out property <string> local-http-url: "http://127.0.0.1:8080/v1/chat/completions";
     in-out property <int> prompt-compiler-index: 0;
+    in-out property <bool> infrastructure-plan-visible: false;
+    in-out property <string> infrastructure-plan-summary: "";
+    in-out property <string> volume-resource: "Not configured";
+    in-out property <string> endpoint-resource: "Not configured";
+    in-out property <string> cost-status: "Current account balance is not exposed by the available RunPod API.";
 
     private property <string> new-project-name: "";
     private property <string> new-shot-title: "";
@@ -93,6 +101,7 @@ export component MainWindow inherits Window {
     private property <string> import-path: "";
     private property <int> import-kind-index: 0;
     private property <string> api-key-entry: "";
+    private property <string> volume-size-gb: "150";
 
     function clear-generation-preview() {
         root.generation-ready = false; root.generation-prompt = "";
@@ -118,7 +127,7 @@ export component MainWindow inherits Window {
                 Button { text: "Compute"; clicked => { root.active-app = 2; } }
                 Button { text: "Settings"; clicked => { root.active-app = 3; } }
                 Rectangle { vertical-stretch: 1; }
-                Text { text: "Prototype 0.5.0"; color: #737b87; font-size: 11px; }
+                Text { text: "Prototype 0.6.0"; color: #737b87; font-size: 11px; }
             }
         }
 
@@ -358,12 +367,27 @@ export component MainWindow inherits Window {
                 Heading { text: "Compute"; }
                 Label { text: "RunPod queue and local job history"; }
                 Rectangle {
-                    background: #1b1f25; border-radius: 7px; min-height: 88px;
+                    background: #1b1f25; border-radius: 7px; min-height: 155px;
                     VerticalLayout {
                         padding: 12px;
                         Text { text: "RunPod: " + root.runpod-status; color: #e1e4e8; font-weight: 700; }
-                        Label { text: "LLM: " + (root.prompt-endpoint-id == "" ? "not configured" : root.prompt-endpoint-id); }
-                        Label { text: "Image: " + (root.image-endpoint-id == "" ? "not configured" : root.image-endpoint-id) + " · Video: " + (root.video-endpoint-id == "" ? "not configured" : root.video-endpoint-id); }
+                        Label { text: "Network Volume: " + root.volume-resource; wrap: word-wrap; }
+                        Label { text: "FLUX.2 Endpoint: " + root.endpoint-resource; wrap: word-wrap; }
+                        Label { text: root.cost-status; wrap: word-wrap; }
+                        Button { text: "Refresh / Plan Nexus Infrastructure"; clicked => { root.plan-infrastructure(root.volume-size-gb); } }
+                    }
+                }
+                if root.infrastructure-plan-visible: Rectangle {
+                    background: #202a25; border-radius: 7px; min-height: 210px;
+                    VerticalLayout {
+                        padding: 12px; spacing: 7px;
+                        Text { text: "Nexus RunPod Plan"; color: #e8f1e9; font-size: 18px; font-weight: 700; }
+                        Text { text: root.infrastructure-plan-summary; color: #b9c4bc; wrap: word-wrap; }
+                        Text { text: "Creating infrastructure may incur persistent storage and compute charges."; color: #ffc77d; wrap: word-wrap; }
+                        HorizontalLayout {
+                            Button { text: "Cancel"; clicked => { root.infrastructure-plan-visible = false; } }
+                            Button { text: "Create Infrastructure"; clicked => { root.apply-infrastructure(); } }
+                        }
                     }
                 }
                 ScrollView {
@@ -393,6 +417,10 @@ export component MainWindow inherits Window {
                     Label { text: "Status: " + root.runpod-status; }
                     Label { text: "API key (blank keeps current key)"; }
                     LineEdit { text <=> root.api-key-entry; placeholder-text: "Stored in the operating system keyring"; input-type: password; }
+                    Button { text: "Save & Check"; clicked => { root.save-settings(root.api-key-entry, root.prompt-endpoint-id, root.image-endpoint-id, root.video-endpoint-id, root.prompt-compiler-index == 0 ? "manual" : root.prompt-compiler-index == 1 ? "local_http" : "runpod", root.local-http-url); root.api-key-entry = ""; root.check-runpod(); } }
+                    Label { text: "Nexus model/cache Network Volume size (GB)"; }
+                    LineEdit { text <=> root.volume-size-gb; }
+                    Button { text: "Plan Nexus Infrastructure"; clicked => { root.plan-infrastructure(root.volume-size-gb); root.active-app = 2; } }
                     Label { text: "Prompt / LLM endpoint ID"; } LineEdit { text <=> root.prompt-endpoint-id; }
                     Label { text: "Image endpoint ID"; } LineEdit { text <=> root.image-endpoint-id; }
                     Label { text: "Video endpoint ID"; } LineEdit { text <=> root.video-endpoint-id; }
