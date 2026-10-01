@@ -1,5 +1,6 @@
 use crate::paths::PortalPaths;
 use crate::project::Project;
+use crate::provisioning::{InfrastructureWorker, ProvisioningState, ProvisioningStateStore};
 use crate::runpod::RunPodWorker;
 use crate::settings::{ApiKeyState, PortalSettings, SettingsStore, load_runpod_api_key};
 use crate::shot::Shot;
@@ -24,6 +25,9 @@ pub struct AppState {
     pub settings: PortalSettings,
     pub api_key: ApiKeyState,
     pub runpod_worker: Option<RunPodWorker>,
+    pub infrastructure_worker: Option<InfrastructureWorker>,
+    pub provisioning_state_store: ProvisioningStateStore,
+    pub provisioning_state: ProvisioningState,
     pub current_conversation_id: Option<String>,
     pub selected_character_id: Option<String>,
     pub selected_reference_media_id: Option<String>,
@@ -36,6 +40,8 @@ impl AppState {
         let nexus_store = NexusStore::open(paths.database_path())?;
         let settings_store = SettingsStore::new(paths.settings_path());
         let settings = settings_store.load()?;
+        let provisioning_state_store = ProvisioningStateStore::new(paths.infrastructure_path());
+        let provisioning_state = provisioning_state_store.load()?;
 
         Ok(Self {
             current_project: None,
@@ -46,6 +52,9 @@ impl AppState {
             settings,
             api_key: load_runpod_api_key(),
             runpod_worker: None,
+            infrastructure_worker: None,
+            provisioning_state_store,
+            provisioning_state,
             current_conversation_id: None,
             selected_character_id: None,
             selected_reference_media_id: None,

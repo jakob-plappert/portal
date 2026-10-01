@@ -1,51 +1,137 @@
-# Nexus and RunPod deployment design
+# Nexus and RunPod
 
-Nexus treats RunPod as temporary compute. Portal owns projects, conversations,
-characters, job history, and media metadata locally. Every completed remote
-artifact must be downloaded into `portaldata/apps/nexus/media`, registered in the
-local SQLite database, and displayed from that local copy. A remote artifact
-can be cleaned up after successful receipt.
+Nexus treats RunPod as temporary compute. Portal remains authoritative for
+projects, conversations, characters, generation history, and final media. A
+successful remote result is downloaded into
+`portaldata/apps/nexus/media/images`, written as an ordinary file, and only then
+registered in SQLite. The Network Volume is not permanent user-media storage.
 
-No FLUX, LTX, or Wan model is deployed by this milestone. The designs below
-describe the next deployment work.
+This repository implements discovery, planning, confirmed provisioning, queue
+polling, local ingestion, and the first FLUX.2 worker. It has not created live
+infrastructure or completed a real remote generation as part of automated
+development.
 
-## Compute strategies
+## First-run RunPod setup
 
-### A. Custom Serverless endpoints (recommended long-term default)
+1. Enter a RunPod API key in Portal Settings. Portal stores it in the operating
+   system keyring, never `settings.toml` or SQLite.
+2. Choose **Plan Nexus Infrastructure**. Nexus authenticates with a harmless
+   read, discovers existing endpoints and volumes, reads the live GPU/data
+   center catalogs, and reads recent billing history.
+3. Review the plan. It states whether each Portal-owned resource will be reused,
+   created, or updated; shows the selected GPU, VRAM, location, documented Pod
+   reference rates, the unavailable Serverless-rate status, and requested
+   volume size.
+4. Choose **Create Infrastructure** to explicitly confirm billable writes. No
+   create request is issued by discovery or planning.
+5. Nexus creates or reuses `portal-nexus-models`, creates or updates
+   `portal-nexus-flux2`, and verifies the endpoint through the provider API.
+   Successful IDs are stored in `infrastructure.toml` after each durable step.
+6. After the worker handler has registered, the first accepted job downloads
+   the required FLUX.2 files to the attached volume. Later workers validate and
+   reuse them.
+7. A TextToImage request is submitted through the queue API. Portal polls off
+   the Slint thread, ingests the returned PNG locally, inserts `MediaAsset`
+   metadata, and marks the job complete only after both file and database work
+   succeed.
 
-Use separate image, video, and prompt-LLM endpoints. Min/flex workers can scale
-to zero when idle. Model weights, ComfyUI, required custom nodes, caches, and
-temporary workflow assets live on an attached network volume so cold workers do
-not redownload everything.
+If volume creation succeeds but endpoint creation fails, Nexus keeps and records
+the volume. A retry rediscovers and reuses it; Portal does not aggressively
+delete a billable resource that may already contain data.
 
-Portal submits a stable versioned request to the appropriate endpoint, polls
-the queue job, downloads each output, and saves it locally. Endpoint IDs remain
-developer-configurable initially. A later milestone can provision or discover
-endpoints so a normal user only supplies a RunPod API key.
+## Two RunPod APIs
 
-### B. Development GPU Pod (recommended for initial debugging)
+RunPod exposes two intentionally separate services:
 
-Start a GPU Pod with the network volume attached, run ComfyUI interactively,
-and test FLUX.2 [dev], LTX-2.5, and Wan 2.2 workflows before packaging a
-serverless worker. Stop or terminate compute when debugging is finished while
-retaining weights and caches on network storage. This provides much faster
-workflow inspection than debugging only through queue responses.
+- `https://api.runpod.io/v2` is the REST API v2 infrastructure surface. Nexus
+  uses its documented Serverless, Network Volume, GPU catalog, data center, and
+  billing endpoints. Provider wire structures are isolated in
+  `runpod_infrastructure.rs` because this API is beta. Request and response
+  fields follow RunPod's current
+  [OpenAPI schema](https://api.runpod.io/v2/openapi.json).
+- `https://api.runpod.ai/v2/{endpoint_id}/...` is the Serverless queue surface.
+  Portal uses `POST run`, `GET status/{job_id}`, and `POST cancel/{job_id}`.
 
-### C. RunPod public endpoints
+The current REST v2 schema exposes neither a supported current account-credit
+or balance field nor a documented live Serverless hourly rate. Nexus says this
+explicitly. Billing totals are labeled actual historical spend. GPU catalog
+`secure` and `community` prices are labeled Pod reference rates and are never
+used as claimed Serverless costs. Portal cannot calculate a defensible
+per-image estimate until a real Serverless rate source is available.
 
-Public endpoints are operationally simplest and may require only an API key,
-but Portal is limited to the hosted models, parameters, and policy offered by
-those endpoints. They may not expose the exact open-weight or ComfyUI workflow
-required by Nexus. Portal should still download results into its local media
-library rather than treating provider storage as permanent.
+## Provisioned resources and cost behavior
 
-## Storage responsibilities
+The default FLUX-first plan requests a configurable 150 GB STANDARD Network
+Volume named `portal-nexus-models`. The size is deliberately shown before
+creation: storage remains billable even when compute is idle. The volume holds
+model weights and reusable caches and leaves headroom for later model work; it
+does not silently allocate a very large video-model volume.
 
-Portal gives each internal app a private Android-like directory under
-`portaldata/apps/<app-id>`. Nexus owns `portaldata/apps/nexus`; future apps such
-as Spybotics receive separate directories. `portaldata/shared` is reserved for
-data intentionally shared across applications rather than being used as an
-implicit dumping ground.
+GPU selection uses the live catalog. The Balanced policy requires at least 48
+GB VRAM, a Serverless pool, current availability, and a data center that also
+supports STANDARD Network Volumes. It prioritizes availability and uses the
+documented secure Pod rate only as a tie-breaker—not as a Serverless price.
+Existing volumes constrain the choice to their data center so idempotent reuse
+remains possible. The user's local GPU is irrelevant to remote placement.
+
+The image endpoint is named `portal-nexus-flux2`, attaches the selected volume,
+uses one GPU, and defaults to `workers.min = 0`, `workers.max = 1`. Idle GPU
+compute can therefore scale to zero, but Network Volume storage continues to
+cost money. A one-hour request timeout permits a slow initial container pull and
+roughly 54 GB model bootstrap; warm generations should be much shorter. Portal
+does not expose automatic delete actions yet.
+
+## FLUX.2 worker
+
+`portal-comfy-worker` is a narrow compute adapter. It knows only the stable
+`MediaWorkerRequest`, a fixed versioned ComfyUI API workflow, and the
+`MediaWorkerResponse`; it has no Portal project, conversation, character, or
+SQLite knowledge. ComfyUI listens only on worker loopback in production.
+
+The worker pins a ComfyUI commit and uses the current
+[Comfy-Org FLUX.2 [dev] split artifacts](https://huggingface.co/Comfy-Org/flux2-dev):
+
+- `flux2_dev_fp8mixed.safetensors` diffusion model;
+- `mistral_3_small_flux2_fp8.safetensors` FLUX.2 text encoder;
+- `flux2-vae.safetensors` VAE.
+
+This FP8/mixed configuration follows the current Comfy-Org workflow and avoids
+the original full-precision checkpoint. It is not FLUX.1 and Portal never
+silently substitutes FLUX.1. Files are downloaded on first worker startup to
+`/runpod-volume/models`, checked by exact expected size, written through `.part`
+files, and atomically renamed while an advisory lock prevents concurrent first
+downloads. No weights are included in Git or the container image.
+
+The Comfy-Org artifacts are downloadable without a token at the time of this
+implementation, so zero-extra-credential provisioning does not require an HF
+token. Their model card points to the original
+[Black Forest Labs FLUX.2 [dev]](https://huggingface.co/black-forest-labs/FLUX.2-dev)
+license; users must comply with those terms. The bootstrap supports an optional
+worker-side `HF_TOKEN` environment variable if legitimate access later requires
+one, and never logs it. Portal does not bypass gated access or license terms.
+
+The first transport returns a size-limited inline PNG. Portal validates media
+kind/MIME type, generates its own local filename, limits remote/inline sizes,
+and never trusts a worker filename as a path. Large video work will use a
+temporary object URL instead of JSON base64.
+
+## Worker image distribution
+
+`.github/workflows/portal-comfy-worker.yml` builds pull requests without
+publishing. Main, worker tags, and manual runs publish version, commit, and
+main/latest tags from `portal-comfy-worker/` to:
+
+```text
+ghcr.io/jakob-plappert/portal-comfy-worker
+```
+
+The workflow uses GitHub's provided `GITHUB_TOKEN`; no registry secret is
+committed. The GHCR package must be made **public** in GitHub package settings
+before RunPod can pull it anonymously. GitHub Actions cannot reliably enforce
+that repository/package visibility setting. The default provisioning image is
+the immutable milestone tag `0.6.0`.
+
+## Local storage and security
 
 ```text
 portaldata/
@@ -53,56 +139,60 @@ portaldata/
     nexus/
       nexus.sqlite3
       settings.toml
+      infrastructure.toml
       media/{images,videos,audio}/
       imports/
       temp/
   shared/
 ```
 
-The network volume should mainly contain:
+`infrastructure.toml` stores only non-secret resource identity and verification
+metadata: volume/endpoint IDs and names, size, data center, selected GPU pool,
+worker image, an optional Serverless-rate snapshot when a supported source
+exists, and verification time. The RunPod key remains in the OS keyring. SQLite
+contains metadata and relative paths, never media BLOBs or secrets.
 
-- model weights;
-- ComfyUI and custom nodes;
-- model/download caches;
-- temporary workflow assets when necessary.
+## Compute alternatives
 
-Permanent generated images, videos, and audio belong on the user's local
-computer under `portaldata/apps/nexus/media`. SQLite contains metadata and relative
-paths only; it does not contain media BLOBs.
+### A. Custom Serverless endpoints (implemented default)
 
-## Stable future worker contract
+Nexus provisions an image endpoint now; later releases can add separate video
+and remote-expert LLM endpoints. Workers scale to zero, weights live on a
+Network Volume, and outputs are downloaded locally. This is the intended
+long-term experience.
 
-Portal sends a versioned media request containing:
+### B. Development GPU Pod
 
-- generation mode and stable model ID;
-- compiled prompt and optional negative prompt;
-- optional seed;
-- generic dimensions and duration where applicable;
-- temporary remote references when the selected mode requires input media.
+For workflow debugging, start a Pod with the same Network Volume attached, run
+ComfyUI interactively, validate the workflow, then stop or terminate compute.
+Weights remain on network storage. This remains the recommended way to diagnose
+new ComfyUI/video workflows before publishing a Serverless worker.
 
-The worker translates that contract into model-specific ComfyUI workflows. Raw
-workflow JSON and node IDs do not cross the public Portal-side boundary.
+### C. RunPod public endpoints
 
-The response reports a status, useful non-secret metadata, errors, and zero or
-more artifacts. Each artifact identifies its media kind and MIME type when
-known. Small outputs may use inline base64. Large images and especially videos
-must use temporary downloadable URLs or object storage so JSON bodies do not
-carry large base64 payloads. Portal then streams the artifact to a normal local
-file, inserts its `MediaAsset` metadata, links it to the generation job, and can
-allow the temporary remote object to expire.
+Public endpoints are operationally simpler but limited to RunPod's hosted
+models, parameters, and policies. They may not expose Nexus's exact open-weight
+workflow. Portal would still download results locally.
 
-## Video and audio
+## Local conversational AI direction
 
-The contract represents true video outputs such as MP4 for text-to-video,
-image-to-video, and video-to-video work. Model profiles separately describe no
-audio, generated synchronized audio, and external audio input. Audio synthesis,
-speech, lip-sync, and model-specific multiplexing remain responsibilities of a
-future RunPod worker; they are not local Portal pipelines.
+The future local Nexus brain is configured conceptually as:
 
-## Next deployment sequence
+- **Fast:** Qwen3.5-9B;
+- **Quality:** Qwen3.5-35B-A3B;
+- **Auto:** Nexus chooses between local modes;
+- **Remote Expert:** optional RunPod LLM only when useful.
 
-1. Build and debug a FLUX.2 [dev] workflow on a development GPU Pod.
-2. Package it behind the versioned contract on a custom image endpoint.
-3. Submit from Nexus and download a real result into the local Media Library.
-4. Add LTX-2.5 and/or Wan 2.2 video workers without changing Portal's stable
-   generation intent or worker contract.
+Portal/Rust remains the authority over files, SQLite, and actions. The LLM gets
+small structured tools, never arbitrary filesystem or shell access. Only
+selected relevant context may reach a remote expert, and local Nexus storage
+remains the source of truth. This milestone does not download or run Qwen.
+
+## Still deliberately deferred
+
+- a verified live RunPod provisioning and PNG generation run;
+- automatic RunPod endpoint deletion;
+- temporary object storage for large artifacts;
+- ImageToImage and all video modes in the worker;
+- production prompt compilation and Qwen downloads;
+- LTX/Wan workflows, synchronized audio, LoRA, face recognition, and editing.

@@ -196,6 +196,9 @@ pub struct GenerationJob {
     pub error: Option<String>,
     pub output_media_id: Option<String>,
     pub remote_job_id: Option<String>,
+    pub gpu_profile: Option<String>,
+    pub advertised_hourly_rate_usd: Option<f64>,
+    pub execution_time_ms: Option<u64>,
 }
 
 /// `NexusStore` owns only a database path, not a long-lived SQLite connection.
@@ -239,8 +242,9 @@ impl NexusStore {
             .transaction()
             .map_err(|error| format!("Could not begin schema transaction: {error}"))?;
 
-        // Version 1 is intentionally explicit. Future versions can inspect
-        // `schema_version` and apply ordered migrations without an ORM.
+        // Schema changes stay as small ordered SQL migrations rather than an
+        // ORM. Version 2 adds cost-estimation inputs; it still stores metadata
+        // only, never generated media bytes.
         transaction
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS schema_version (
@@ -324,7 +328,16 @@ impl NexusStore {
                 row.get(0)
             })
             .map_err(|error| format!("Could not read Nexus schema version: {error}"))?;
-        if version != 1 {
+        if version == 1 {
+            transaction
+                .execute_batch(
+                    "ALTER TABLE generation_jobs ADD COLUMN gpu_profile TEXT;
+                     ALTER TABLE generation_jobs ADD COLUMN advertised_hourly_rate_usd REAL;
+                     ALTER TABLE generation_jobs ADD COLUMN execution_time_ms INTEGER;
+                     UPDATE schema_version SET version=2;",
+                )
+                .map_err(|error| format!("Could not migrate Nexus schema to version 2: {error}"))?;
+        } else if version != 2 {
             return Err(format!(
                 "Nexus database schema version {version} is not supported by this Portal build."
             ));
@@ -727,6 +740,9 @@ impl NexusStore {
             error: None,
             output_media_id: None,
             remote_job_id: None,
+            gpu_profile: None,
+            advertised_hourly_rate_usd: None,
+            execution_time_ms: None,
         };
         let seed_i64 = seed.map(seed_to_i64).transpose()?;
         self.connection()?
@@ -786,13 +802,47 @@ impl NexusStore {
         Ok(())
     }
 
+    pub fn update_job_metrics(
+        &self,
+        id: &str,
+        gpu_profile: Option<&str>,
+        advertised_hourly_rate_usd: Option<f64>,
+        execution_time_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let execution_time_ms = execution_time_ms
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| String::from("Execution time is too large for local storage."))?;
+        let changed = self
+            .connection()?
+            .execute(
+                "UPDATE generation_jobs SET gpu_profile=COALESCE(?2, gpu_profile),
+                    advertised_hourly_rate_usd=COALESCE(?3, advertised_hourly_rate_usd),
+                    execution_time_ms=COALESCE(?4, execution_time_ms), updated_at=?5
+                 WHERE id=?1",
+                params![
+                    id,
+                    gpu_profile,
+                    advertised_hourly_rate_usd,
+                    execution_time_ms,
+                    now_timestamp()?
+                ],
+            )
+            .map_err(|error| format!("Could not update generation job metrics: {error}"))?;
+        if changed == 0 {
+            return Err(format!("Generation job '{id}' was not found."));
+        }
+        Ok(())
+    }
+
     pub fn list_jobs(&self) -> Result<Vec<GenerationJob>, String> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
                 "SELECT id, generation_mode, model_id, provider, status, user_idea,
                         compiled_prompt, seed, created_at, updated_at, error,
-                        output_media_id, remote_job_id
+                        output_media_id, remote_job_id, gpu_profile,
+                        advertised_hourly_rate_usd, execution_time_ms
                  FROM generation_jobs ORDER BY updated_at DESC, id DESC",
             )
             .map_err(|error| format!("Could not prepare job query: {error}"))?;
@@ -812,6 +862,9 @@ impl NexusStore {
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<f64>>(14)?,
+                    row.get::<_, Option<i64>>(15)?,
                 ))
             })
             .map_err(|error| format!("Could not query jobs: {error}"))?;
@@ -832,9 +885,26 @@ impl NexusStore {
                     error: row.10,
                     output_media_id: row.11,
                     remote_job_id: row.12,
+                    gpu_profile: row.13,
+                    advertised_hourly_rate_usd: row.14,
+                    execution_time_ms: row.15.map(|value| value as u64),
                 })
             })
             .collect()
+    }
+
+    pub fn non_terminal_remote_jobs(&self) -> Result<Vec<GenerationJob>, String> {
+        Ok(self
+            .list_jobs()?
+            .into_iter()
+            .filter(|job| {
+                job.remote_job_id.is_some()
+                    && !matches!(
+                        job.status,
+                        JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                    )
+            })
+            .collect())
     }
 }
 
@@ -1041,6 +1111,9 @@ mod tests {
         store
             .update_job(&job.id, JobStatus::Queued, Some("remote-123"), None, None)
             .expect("job should update");
+        store
+            .update_job_metrics(&job.id, Some("NVIDIA L40S"), Some(1.25), Some(12_000))
+            .expect("job cost inputs should update");
         drop(store);
         let reopened = NexusStore::open(directory.path().join("nexus.sqlite3"))
             .expect("database should reopen");
@@ -1048,6 +1121,9 @@ mod tests {
         assert_eq!(loaded[0].status, JobStatus::Queued);
         assert_eq!(loaded[0].remote_job_id.as_deref(), Some("remote-123"));
         assert_eq!(loaded[0].seed, Some(42));
+        assert_eq!(loaded[0].gpu_profile.as_deref(), Some("NVIDIA L40S"));
+        assert_eq!(loaded[0].advertised_hourly_rate_usd, Some(1.25));
+        assert_eq!(loaded[0].execution_time_ms, Some(12_000));
     }
 
     #[test]

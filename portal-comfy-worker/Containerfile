@@ -1,23 +1,39 @@
 FROM pytorch/pytorch:2.12.0-cuda13.0-cudnn9-runtime
 
+# Pinning ComfyUI keeps the fixed API workflow tied to a known source revision.
+# A deliberate worker release can advance this commit after validation.
+ARG COMFYUI_COMMIT=b65d1ffaca35fcda5889e120dcd0c8520553c7b2
+
 RUN apt-get update \
-    && apt-get install -y git python3.12-venv \
+    && apt-get install -y --no-install-recommends git python3.12-venv \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
 
-RUN git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git
+RUN git clone https://github.com/Comfy-Org/ComfyUI.git \
+    && cd ComfyUI \
+    && git checkout "${COMFYUI_COMMIT}"
 
 WORKDIR /opt/ComfyUI
 
 RUN python3 -m venv --system-site-packages /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-RUN git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git \
-        custom_nodes/ComfyUI-GGUF \
-    && /opt/venv/bin/pip install --no-cache-dir \
-        -r custom_nodes/ComfyUI-GGUF/requirements.txt
+COPY requirements-worker.txt /opt/portal-worker/requirements-worker.txt
+RUN /opt/venv/bin/pip install --no-cache-dir \
+    -r /opt/portal-worker/requirements-worker.txt
 
 COPY extra_model_paths.yaml /opt/ComfyUI/extra_model_paths.yaml
+COPY handler.py portal_worker.py model_bootstrap.py /opt/portal-worker/
+COPY workflows /opt/portal-worker/workflows
 
-CMD ["/opt/venv/bin/python", "main.py", "--listen", "0.0.0.0", "--port", "8188", "--output-directory", "/output"]
+ENV COMFYUI_DIR=/opt/ComfyUI \
+    NEXUS_MODEL_ROOT=/runpod-volume/models \
+    COMFYUI_OUTPUT_DIR=/tmp/portal-output \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/portal-worker
+
+# The production container exposes only RunPod's handler. ComfyUI listens on
+# loopback inside the worker and is not a public web interface.
+CMD ["/opt/venv/bin/python", "handler.py"]
