@@ -626,7 +626,7 @@ fn prepare_submission(
     store.update_job_metrics(
         &job.id,
         provisioned.gpu_type_id.as_deref(),
-        provisioned.advertised_gpu_usd_per_hour,
+        provisioned.serverless_usd_per_hour,
         None,
     )?;
     store.update_job(&job.id, JobStatus::Preparing, None, None, None)?;
@@ -928,13 +928,22 @@ fn plan_summary(plan: &crate::provisioning::ProvisioningPlan) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let serverless_rate = plan
+        .selected_gpu
+        .serverless_usd_per_hour
+        .map(|rate| format!("Current advertised Serverless rate: ${rate:.4}/hour"))
+        .unwrap_or_else(|| {
+            String::from("Serverless rate is not exposed by the current RunPod REST API v2.")
+        });
     format!(
-        "{actions}\n\nGPU: {} · {} GB VRAM · {}\nLocation: {}\nCurrent advertised rate: ${:.4}/hour\nSource: RunPod live catalog\n\n{}",
+        "{actions}\n\nGPU: {} · {} GB VRAM · {}\nLocation: {}\n{}\nSecure Pod reference rate: ${:.4}/hour\nCommunity Pod reference rate: ${:.4}/hour\nPod rates are catalog references used only for GPU ranking; they are not Serverless prices.\n\n{}",
         plan.selected_gpu.display_name,
         plan.selected_gpu.memory_gb,
         plan.selected_gpu.availability,
         plan.selected_gpu.data_center_id,
-        plan.selected_gpu.advertised_serverless_usd_per_hour,
+        serverless_rate,
+        plan.selected_gpu.secure_pod_reference_usd_per_hour,
+        plan.selected_gpu.community_pod_reference_usd_per_hour,
         plan.cost_note
     )
 }
@@ -945,7 +954,7 @@ fn cost_summary(plan: &crate::provisioning::ProvisioningPlan) -> String {
         .map(|value| format!("Actual recent spend reported by RunPod: ${value:.4}. "))
         .unwrap_or_else(|| String::from("RunPod returned no recent billing total. "));
     format!(
-        "{spend}Current account balance is not exposed by the available RunPod REST API v2. Per-image estimate: not enough completed jobs."
+        "{spend}Current account balance is not exposed by the available RunPod REST API v2. Serverless rate is also unavailable, so a per-image cost estimate cannot be calculated from current catalog data."
     )
 }
 
@@ -967,5 +976,38 @@ fn set_status(weak: &slint::Weak<MainWindow>, message: String) {
 fn set_media_status(weak: &slint::Weak<MainWindow>, message: &str) {
     if let Some(window) = weak.upgrade() {
         window.set_media_status(message.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provisioning::{ProvisioningPlan, SelectedGpu};
+
+    #[test]
+    fn plan_ui_does_not_present_pod_pricing_as_a_serverless_rate() {
+        let plan = ProvisioningPlan {
+            actions: Vec::new(),
+            selected_gpu: SelectedGpu {
+                type_id: String::from("NVIDIA L40S"),
+                display_name: String::from("L40S"),
+                pool_id: String::from("ADA_48"),
+                memory_gb: 48,
+                serverless_usd_per_hour: None,
+                secure_pod_reference_usd_per_hour: 0.8,
+                community_pod_reference_usd_per_hour: 0.6,
+                data_center_id: String::from("EU-1"),
+                availability: String::from("HIGH"),
+            },
+            volume_size_gb: 150,
+            actual_recent_spend_usd: Some(4.5),
+            cost_note: String::from("Persistent storage is billable."),
+        };
+
+        let summary = plan_summary(&plan);
+        assert!(summary.contains("Serverless rate is not exposed"));
+        assert!(summary.contains("Secure Pod reference rate: $0.8000/hour"));
+        assert!(summary.contains("not Serverless prices"));
+        assert!(!summary.contains("Serverless rate: $0.0000"));
     }
 }

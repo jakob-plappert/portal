@@ -78,8 +78,8 @@ pub struct GpuType {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GpuPrice {
-    #[serde(default)]
-    pub serverless: Option<f64>,
+    pub secure: f64,
+    pub community: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,32 +172,8 @@ impl RunPodInfrastructureClient {
     }
 
     pub fn list_endpoints(&self) -> Result<Vec<Endpoint>, String> {
-        let mut endpoints = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let mut request = self
-                .agent
-                .get(format!("{}/v2/serverless", self.base_url))
-                .query("limit", "1000");
-            if let Some(value) = cursor.as_deref() {
-                // `query` percent-encodes the provider's opaque cursor instead
-                // of treating it as part of a URL assembled by Portal.
-                request = request.query("cursor", value);
-            }
-            let response = request
-                .header("Authorization", &format!("Bearer {}", self.api_key))
-                .call()
-                .map_err(provider_error)?;
-            let page: wire::ListEndpointsResponse = read_json(response, "endpoint list")?;
-            endpoints.extend(page.endpoints);
-            if !page.pagination.has_next_page {
-                break;
-            }
-            cursor = Some(page.pagination.next_cursor.ok_or_else(|| {
-                String::from("RunPod endpoint pagination omitted its required next cursor.")
-            })?);
-        }
-        Ok(endpoints)
+        let response: wire::ListEndpointsResponse = self.get("/v2/serverless")?;
+        Ok(response.endpoints)
     }
 
     pub fn get_endpoint(&self, id: &str) -> Result<Endpoint, String> {
@@ -344,15 +320,6 @@ mod wire {
     #[derive(Deserialize)]
     pub struct ListEndpointsResponse {
         pub endpoints: Vec<Endpoint>,
-        pub pagination: Pagination,
-    }
-
-    #[derive(Deserialize)]
-    pub struct Pagination {
-        #[serde(rename = "nextCursor")]
-        pub next_cursor: Option<String>,
-        #[serde(rename = "hasNextPage")]
-        pub has_next_page: bool,
     }
 
     #[derive(Deserialize)]
@@ -408,7 +375,7 @@ mod tests {
                 "id":"NVIDIA L40S", "name":"L40S", "pool":"ADA_48",
                 "manufacturer":"NVIDIA", "memory":48,
                 "secure":true, "community":true,
-                "price":{"secure":0.8,"community":0.6,"serverless":1.3},
+                "price":{"secure":0.8,"community":0.6},
                 "maxCount":{"secure":8,"community":4},
                 "availability":"HIGH",
                 "dataCenters":[{"id":"EU-RO-1","name":"Romania","availability":"HIGH"}]
@@ -417,11 +384,12 @@ mod tests {
         let parsed: wire::ListGpusResponse =
             serde_json::from_str(raw).expect("official-shaped fixture should parse");
         assert_eq!(parsed.gpus[0].memory, 48);
-        assert_eq!(parsed.gpus[0].price.serverless, Some(1.3));
+        assert_eq!(parsed.gpus[0].price.secure, 0.8);
+        assert_eq!(parsed.gpus[0].price.community, 0.6);
     }
 
     #[test]
-    fn endpoint_and_volume_discovery_fixtures_parse() {
+    fn endpoint_listing_parses_current_shape_without_pagination() {
         let endpoints: wire::ListEndpointsResponse = serde_json::from_value(serde_json::json!({
             "endpoints": [{
                 "id": "endpoint-1",
@@ -433,10 +401,14 @@ mod tests {
                 "gpu": {"pools": ["ADA_48"], "count": 1},
                 "timeout": 3600000,
                 "disk": 20
-            }],
-            "pagination": {"nextCursor": null, "hasNextPage": false}
+            }]
         }))
         .expect("endpoint fixture should parse");
+        assert_eq!(endpoints.endpoints[0].workers.min, 0);
+    }
+
+    #[test]
+    fn network_volume_listing_parses_current_shape() {
         let volumes: wire::ListNetworkVolumesResponse = serde_json::from_value(serde_json::json!({
             "networkVolumes": [{
                 "id": "volume-1", "name": "portal-nexus-models",
@@ -444,7 +416,6 @@ mod tests {
             }]
         }))
         .expect("volume fixture should parse");
-        assert_eq!(endpoints.endpoints[0].workers.min, 0);
         assert_eq!(volumes.network_volumes[0].size, 150);
     }
 

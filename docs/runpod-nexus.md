@@ -19,8 +19,9 @@ development.
    read, discovers existing endpoints and volumes, reads the live GPU/data
    center catalogs, and reads recent billing history.
 3. Review the plan. It states whether each Portal-owned resource will be reused,
-   created, or updated; shows the selected GPU, VRAM, location, current
-   advertised hourly rate, and requested volume size.
+   created, or updated; shows the selected GPU, VRAM, location, documented Pod
+   reference rates, the unavailable Serverless-rate status, and requested
+   volume size.
 4. Choose **Create Infrastructure** to explicitly confirm billable writes. No
    create request is issued by discovery or planning.
 5. Nexus creates or reuses `portal-nexus-models`, creates or updates
@@ -51,11 +52,12 @@ RunPod exposes two intentionally separate services:
 - `https://api.runpod.ai/v2/{endpoint_id}/...` is the Serverless queue surface.
   Portal uses `POST run`, `GET status/{job_id}`, and `POST cancel/{job_id}`.
 
-The current REST v2 schema does not expose a supported current account-credit
-or balance field. Nexus says this explicitly. Billing totals are labeled actual
-historical spend, GPU catalog pricing is labeled a current advertised rate, and
-Portal calculations are labeled estimates. Before completed timing samples
-exist, Nexus reports that there is not enough data for a per-image estimate.
+The current REST v2 schema exposes neither a supported current account-credit
+or balance field nor a documented live Serverless hourly rate. Nexus says this
+explicitly. Billing totals are labeled actual historical spend. GPU catalog
+`secure` and `community` prices are labeled Pod reference rates and are never
+used as claimed Serverless costs. Portal cannot calculate a defensible
+per-image estimate until a real Serverless rate source is available.
 
 ## Provisioned resources and cost behavior
 
@@ -65,12 +67,12 @@ creation: storage remains billable even when compute is idle. The volume holds
 model weights and reusable caches and leaves headroom for later model work; it
 does not silently allocate a very large video-model volume.
 
-GPU selection uses the live Serverless catalog. The Balanced policy requires at
-least 48 GB VRAM, a serverless pool and advertised rate, current availability,
-and a data center that also supports STANDARD Network Volumes. It prioritizes
-availability and then lower advertised rate. Existing volumes constrain the
-choice to their data center so idempotent reuse remains possible. The user's
-local GPU is irrelevant to remote placement.
+GPU selection uses the live catalog. The Balanced policy requires at least 48
+GB VRAM, a Serverless pool, current availability, and a data center that also
+supports STANDARD Network Volumes. It prioritizes availability and uses the
+documented secure Pod rate only as a tie-breaker—not as a Serverless price.
+Existing volumes constrain the choice to their data center so idempotent reuse
+remains possible. The user's local GPU is irrelevant to remote placement.
 
 The image endpoint is named `portal-nexus-flux2`, attaches the selected volume,
 uses one GPU, and defaults to `workers.min = 0`, `workers.max = 1`. Idle GPU
@@ -146,9 +148,9 @@ portaldata/
 
 `infrastructure.toml` stores only non-secret resource identity and verification
 metadata: volume/endpoint IDs and names, size, data center, selected GPU pool,
-worker image, advertised rate snapshot, and verification time. The RunPod key
-remains in the OS keyring. SQLite contains metadata and relative paths, never
-media BLOBs or secrets.
+worker image, an optional Serverless-rate snapshot when a supported source
+exists, and verification time. The RunPod key remains in the OS keyring. SQLite
+contains metadata and relative paths, never media BLOBs or secrets.
 
 ## Compute alternatives
 

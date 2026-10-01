@@ -43,8 +43,12 @@ pub struct SelectedGpu {
     pub display_name: String,
     pub pool_id: String,
     pub memory_gb: u32,
-    /// Current provider-advertised rate, not an invoice or balance.
-    pub advertised_serverless_usd_per_hour: f64,
+    /// REST API v2 currently does not publish a Serverless hourly rate. This
+    /// separate `Option` prevents a Pod catalog price from being mistaken for
+    /// the eventual endpoint's compute rate.
+    pub serverless_usd_per_hour: Option<f64>,
+    pub secure_pod_reference_usd_per_hour: f64,
+    pub community_pod_reference_usd_per_hour: f64,
     pub data_center_id: String,
     pub availability: String,
 }
@@ -99,7 +103,7 @@ pub struct ProvisioningState {
     pub gpu_type_id: Option<String>,
     pub gpu_pool_id: Option<String>,
     pub worker_image: Option<String>,
-    pub advertised_gpu_usd_per_hour: Option<f64>,
+    pub serverless_usd_per_hour: Option<f64>,
     pub last_verified_unix: Option<u64>,
 }
 
@@ -266,7 +270,7 @@ pub fn build_plan(
         volume_size_gb,
         actual_recent_spend_usd: discovery.recent_billing.total_usd,
         cost_note: String::from(
-            "Estimated future compute is the advertised hourly rate × execution time. Idle compute is $0 with min workers 0; persistent Network Volume storage is still billable.",
+            "Serverless rate is not exposed by the current RunPod REST API v2, so future Serverless compute cost cannot yet be estimated. Idle compute is $0 with min workers 0; persistent Network Volume storage is still billable.",
         ),
     })
 }
@@ -380,8 +384,7 @@ pub fn apply_plan(
     remembered.gpu_type_id = Some(plan.selected_gpu.type_id.clone());
     remembered.gpu_pool_id = Some(plan.selected_gpu.pool_id.clone());
     remembered.worker_image = Some(String::from(FLUX_WORKER_IMAGE));
-    remembered.advertised_gpu_usd_per_hour =
-        Some(plan.selected_gpu.advertised_serverless_usd_per_hour);
+    remembered.serverless_usd_per_hour = plan.selected_gpu.serverless_usd_per_hour;
     remembered.last_verified_unix = Some(now_unix()?);
     state_store.save(&remembered)?;
 
@@ -487,7 +490,6 @@ fn select_gpu(
         .iter()
         .filter_map(|gpu| {
             let pool_id = gpu.pool.as_ref()?;
-            let rate = gpu.price.serverless?;
             if gpu.memory < MINIMUM_FLUX_VRAM_GB || gpu.availability.as_deref() == Some("NONE") {
                 return None;
             }
@@ -511,7 +513,9 @@ fn select_gpu(
                 display_name: gpu.name.clone(),
                 pool_id: pool_id.clone(),
                 memory_gb: gpu.memory,
-                advertised_serverless_usd_per_hour: rate,
+                serverless_usd_per_hour: None,
+                secure_pod_reference_usd_per_hour: gpu.price.secure,
+                community_pod_reference_usd_per_hour: gpu.price.community,
                 data_center_id: location.id.clone(),
                 availability: location.availability.clone(),
             })
@@ -519,14 +523,19 @@ fn select_gpu(
         .collect::<Vec<_>>();
 
     candidates.sort_by(|left, right| match policy {
-        GpuPolicy::Economy => rate_order(left, right),
+        GpuPolicy::Economy => pod_reference_rate_order(left, right).then_with(|| {
+            availability_rank(&right.availability).cmp(&availability_rank(&left.availability))
+        }),
         GpuPolicy::Balanced => availability_rank(&right.availability)
             .cmp(&availability_rank(&left.availability))
-            .then_with(|| rate_order(left, right)),
+            .then_with(|| pod_reference_rate_order(left, right)),
         GpuPolicy::Performance => right
             .memory_gb
             .cmp(&left.memory_gb)
-            .then_with(|| rate_order(left, right)),
+            .then_with(|| {
+                availability_rank(&right.availability).cmp(&availability_rank(&left.availability))
+            })
+            .then_with(|| pod_reference_rate_order(left, right)),
     });
     candidates.into_iter().next().ok_or_else(|| {
         String::from(
@@ -535,9 +544,11 @@ fn select_gpu(
     })
 }
 
-fn rate_order(left: &SelectedGpu, right: &SelectedGpu) -> Ordering {
-    left.advertised_serverless_usd_per_hour
-        .partial_cmp(&right.advertised_serverless_usd_per_hour)
+fn pod_reference_rate_order(left: &SelectedGpu, right: &SelectedGpu) -> Ordering {
+    // This is only a deterministic selection heuristic. Secure Pod catalog
+    // pricing is not used for a Serverless cost claim or job estimate.
+    left.secure_pod_reference_usd_per_hour
+        .partial_cmp(&right.secure_pod_reference_usd_per_hour)
         .unwrap_or(Ordering::Equal)
 }
 
@@ -675,7 +686,8 @@ mod tests {
                 pool: Some(String::from("ADA_48")),
                 memory: 48,
                 price: GpuPrice {
-                    serverless: Some(1.25),
+                    secure: 0.8,
+                    community: 0.6,
                 },
                 availability: Some(String::from("HIGH")),
                 data_centers: vec![GpuDataCenter {
@@ -739,7 +751,25 @@ mod tests {
             plan.actions[1],
             ProvisioningAction::CreateImageEndpoint
         ));
-        assert!(plan.cost_note.contains("Estimated future compute"));
+        assert!(plan.cost_note.contains("Serverless rate is not exposed"));
+        assert_eq!(plan.selected_gpu.serverless_usd_per_hour, None);
+        assert_eq!(plan.selected_gpu.secure_pod_reference_usd_per_hour, 0.8);
+    }
+
+    #[test]
+    fn gpu_selection_succeeds_without_a_serverless_price() {
+        for policy in [
+            GpuPolicy::Economy,
+            GpuPolicy::Balanced,
+            GpuPolicy::Performance,
+        ] {
+            let plan = build_plan(&discovery(), &ProvisioningState::default(), policy, 150)
+                .expect("documented Pod reference prices must not block Serverless GPU selection");
+
+            assert_eq!(plan.selected_gpu.type_id, "NVIDIA L40S");
+            assert_eq!(plan.selected_gpu.serverless_usd_per_hour, None);
+            assert_eq!(plan.selected_gpu.community_pod_reference_usd_per_hour, 0.6);
+        }
     }
 
     #[test]
