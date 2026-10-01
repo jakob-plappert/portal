@@ -1,650 +1,458 @@
-import {
-    Button,
-    LineEdit,
-    ScrollView
-} from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 
-export struct ProjectListItem {
-    name: string,
-    folder-name: string,
-}
+export struct ProjectListItem { name: string, folder-name: string }
+export struct ShotListItem { number: int, title: string, brief: string, label: string }
+export struct ConversationListItem { id: string, title: string }
+export struct MessageListItem { id: string, role: string, content: string }
+export struct CharacterListItem { id: string, name: string, description: string, notes: string, references: string }
+export struct MediaListItem { id: string, kind: string, path: string, details: string }
+export struct JobListItem { id: string, status: string, model: string, details: string }
 
-export struct ShotListItem {
-    number: int,
-    title: string,
-    brief: string,
-    label: string,
-}
+component Heading inherits Text { color: #f5f6f8; font-size: 28px; font-weight: 700; }
+component Label inherits Text { color: #9da5b1; font-size: 12px; }
+component Section inherits Text { color: #7f8896; font-size: 11px; font-weight: 700; }
 
 export component MainWindow inherits Window {
     callback create-project(string);
     callback create-shot(string, string);
     callback open-project(string);
+    callback prepare-generation(int);
     callback refresh-projects();
+    callback new-conversation();
+    callback select-conversation(string);
+    callback send-message(string);
+    callback save-character(string, string, string, string);
+    callback select-character(string);
+    callback attach-character-reference(string, string);
+    callback remove-character-reference(string, string);
+    callback import-media(string, string);
+    callback select-reference-media(string);
+    callback submit-generation(string, string, string, string, string, string, string);
+    callback save-settings(string, string, string, string, string, string);
 
-    in-out property <bool>
-        new-project-dialog-open: false;
+    in-out property <int> active-app: 1;
+    in-out property <int> nexus-tab: 0;
+    in-out property <string> nexus-display-name: "";
+    in-out property <string> nexus-subtitle: "";
+    in-out property <bool> new-project-dialog-open: false;
+    in-out property <bool> new-shot-dialog-open: false;
+    in-out property <bool> open-project-dialog-open: false;
+    in-out property <bool> project-open: false;
+    in-out property <string> current-project-name: "";
+    in-out property <int> current-shot-number: 0;
+    in-out property <string> current-shot-title: "";
+    in-out property <string> current-shot-brief: "";
+    in-out property <string> project-error: "";
+    in-out property <string> shot-error: "";
+    in-out property <bool> generation-ready: false;
+    in-out property <string> generation-prompt: "";
+    in-out property <string> generation-resolution: "";
+    in-out property <string> generation-seed: "";
+    in-out property <string> generation-error: "";
+    in-out property <[ProjectListItem]> available-projects: [];
+    in-out property <[ShotListItem]> shots: [];
+    in-out property <[ConversationListItem]> conversations: [];
+    in-out property <[MessageListItem]> messages: [];
+    in-out property <[CharacterListItem]> characters: [];
+    in-out property <[MediaListItem]> media-assets: [];
+    in-out property <[JobListItem]> jobs: [];
+    in-out property <string> current-conversation-id: "";
+    in-out property <string> current-conversation-title: "New conversation";
+    in-out property <string> selected-character-id: "";
+    in-out property <string> selected-reference-id: "";
+    in-out property <string> selected-reference-label: "No reference selected";
+    in-out property <string> nexus-status: "Ready";
+    in-out property <string> character-status: "";
+    in-out property <string> media-status: "";
+    in-out property <string> compute-status: "";
+    in-out property <string> settings-status: "";
+    in-out property <string> runpod-status: "Not configured";
+    in-out property <string> storage-path: "";
+    in-out property <string> prompt-endpoint-id: "";
+    in-out property <string> image-endpoint-id: "";
+    in-out property <string> video-endpoint-id: "";
+    in-out property <string> local-http-url: "http://127.0.0.1:8080/v1/chat/completions";
+    in-out property <int> prompt-compiler-index: 0;
 
-    in-out property <bool>
-        new-shot-dialog-open: false;
+    private property <string> new-project-name: "";
+    private property <string> new-shot-title: "";
+    private property <string> new-shot-brief: "";
+    private property <string> chat-input: "";
+    private property <bool> advanced-open: false;
+    private property <int> mode-index: 0;
+    private property <int> model-index: 0;
+    private property <string> manual-prompt: "";
+    private property <string> negative-prompt: "";
+    private property <string> manual-seed: "";
+    private property <string> dimensions: "1024x1024";
+    private property <string> duration: "5";
+    private property <string> character-name: "";
+    private property <string> character-description: "";
+    private property <string> character-notes: "";
+    private property <string> character-references: "No linked references";
+    private property <string> import-path: "";
+    private property <int> import-kind-index: 0;
+    private property <string> api-key-entry: "";
 
-    in-out property <bool>
-        open-project-dialog-open: false;
-
-    in-out property <bool>
-        project-open: false;
-
-    in-out property <string>
-        current-project-name: "";
-
-    in-out property <int>
-        current-shot-number: 0;
-
-    in-out property <string>
-        current-shot-title: "";
-
-    in-out property <string>
-        current-shot-brief: "";
-
-    in-out property <string>
-        project-error: "";
-
-    in-out property <string>
-        shot-error: "";
-
-    in-out property <[ProjectListItem]>
-        available-projects: [];
-
-    in-out property <[ShotListItem]>
-        shots: [];
-
-    private property <string>
-        new-project-name: "";
-
-    private property <string>
-        new-shot-title: "";
-
-    private property <string>
-        new-shot-brief: "";
+    function clear-generation-preview() {
+        root.generation-ready = false; root.generation-prompt = "";
+        root.generation-resolution = ""; root.generation-seed = ""; root.generation-error = "";
+    }
 
     title: "Portal";
-
-    // A preferred size gives the window its intended initial dimensions while
-    // still allowing the separate minimum constraints below.
-    preferred-width: 1280px;
-    preferred-height: 800px;
-
-    min-width: 900px;
-    min-height: 600px;
-
-    background: #17191d;
+    preferred-width: 1440px; preferred-height: 900px;
+    min-width: 1050px; min-height: 680px;
+    background: #15171b;
 
     HorizontalLayout {
         spacing: 0px;
-
         Rectangle {
-            width: 220px;
-            background: #202329;
-
+            width: 190px; background: #202329;
             VerticalLayout {
-                padding: 16px;
-                spacing: 12px;
+                padding: 16px; spacing: 8px;
+                Text { text: "PORTAL"; color: #f5f6f8; font-size: 24px; font-weight: 700; }
+                Label { text: "Desktop workspace"; }
+                Rectangle { height: 14px; }
+                Button { text: "Home"; clicked => { root.active-app = 0; } }
+                Button { text: root.nexus-display-name; clicked => { root.active-app = 1; } }
+                Button { text: "Compute"; clicked => { root.active-app = 2; } }
+                Button { text: "Settings"; clicked => { root.active-app = 3; } }
+                Rectangle { vertical-stretch: 1; }
+                Text { text: "Prototype 0.5.0"; color: #737b87; font-size: 11px; }
+            }
+        }
 
-                Text {
-                    text: "PORTAL";
-                    color: #f5f5f5;
-                    font-size: 24px;
-                    font-weight: 700;
+        if root.active-app == 0: Rectangle {
+            horizontal-stretch: 1; background: #15171b;
+            VerticalLayout {
+                padding: 25px; spacing: 10px;
+                Heading { text: "Home"; }
+                Label { text: "Projects and shots"; }
+                if !root.project-open: Rectangle {
+                    vertical-stretch: 1; background: #101216; border-radius: 8px;
+                    VerticalLayout {
+                        alignment: center; spacing: 10px;
+                        Text { text: "No project open"; color: #e0e3e7; font-size: 20px; horizontal-alignment: center; }
+                        HorizontalLayout {
+                            alignment: center; spacing: 8px;
+                            Button { text: "New Project"; clicked => { root.project-error = ""; root.new-project-dialog-open = true; } }
+                            Button { text: "Open Project"; clicked => { root.refresh-projects(); root.open-project-dialog-open = true; } }
+                        }
+                    }
                 }
-
-                Rectangle {
-                    height: 14px;
-                }
-
-                Button {
-                    text: "Nexus";
-                }
-
-                Button {
-                    text: "Compute";
-                }
-
-                Button {
-                    text: "Settings";
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                }
-
-                Text {
-                    text: "0.3.0";
-                    color: #737982;
-                    font-size: 12px;
+                if root.project-open: Rectangle {
+                    vertical-stretch: 1; background: #101216; border-radius: 8px;
+                    HorizontalLayout {
+                        spacing: 0px;
+                        Rectangle {
+                            width: 280px; background: #1a1d22;
+                            VerticalLayout {
+                                padding: 15px; spacing: 8px;
+                                Text { text: root.current-project-name; color: #f5f6f8; font-size: 18px; font-weight: 700; }
+                                HorizontalLayout {
+                                    Button { text: "+ Shot"; clicked => { root.new-shot-dialog-open = true; } }
+                                    Button { text: "Projects"; clicked => { root.refresh-projects(); root.open-project-dialog-open = true; } }
+                                }
+                                ScrollView {
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        for shot in root.shots: Button {
+                                            text: shot.label;
+                                            clicked => { root.clear-generation-preview(); root.current-shot-number = shot.number; root.current-shot-title = shot.title; root.current-shot-brief = shot.brief; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            VerticalLayout {
+                                padding: 24px; spacing: 10px;
+                                Text { text: root.current-shot-number == 0 ? "No shot selected" : root.current-shot-title; color: #f5f6f8; font-size: 23px; font-weight: 700; }
+                                Text { text: root.current-shot-brief; color: #b8bec7; wrap: word-wrap; }
+                                if root.current-shot-number != 0: Button { text: "Prepare GenerationSpec"; clicked => { root.prepare-generation(root.current-shot-number); } }
+                                if root.generation-ready: Text { text: root.generation-prompt + "\n" + root.generation-resolution + " · Seed " + root.generation-seed; color: #aab1bc; wrap: word-wrap; }
+                                if root.generation-error != "": Text { text: root.generation-error; color: #ff8282; wrap: word-wrap; }
+                                Rectangle { vertical-stretch: 1; }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        Rectangle {
-            horizontal-stretch: 1;
-            background: #17191d;
-
-            VerticalLayout {
-                padding: 28px;
-                spacing: 12px;
-
-                Text {
-                    text: "Nexus";
-                    color: #f5f5f5;
-                    font-size: 30px;
-                    font-weight: 700;
-                }
-
-                Text {
-                    text: "AI Production Studio";
-                    color: #9ca3af;
-                    font-size: 15px;
-                }
-
+        if root.active-app == 1: Rectangle {
+            horizontal-stretch: 1; background: #101216;
+            HorizontalLayout {
+                spacing: 0px;
                 Rectangle {
-                    height: 10px;
-                }
-
-                if !root.project-open: Rectangle {
-                    horizontal-stretch: 1;
-                    vertical-stretch: 1;
-
-                    background: #111318;
-                    border-radius: 8px;
-
+                    width: 240px; background: #1a1d22;
                     VerticalLayout {
-                        alignment: center;
-                        spacing: 12px;
-
-                        Text {
-                            text: "No project open";
-                            color: #d1d5db;
-                            font-size: 20px;
-                            horizontal-alignment: center;
-                        }
-
-                        Text {
-                            text: "Create a new project or open an existing one.";
-                            color: #737982;
-                            font-size: 14px;
-                            horizontal-alignment: center;
-                        }
-
-                        Rectangle {
-                            height: 8px;
-                        }
-
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 10px;
-
-                            Button {
-                                text: "New Project";
-
-                                clicked => {
-                                    root.new-project-name = "";
-                                    root.project-error = "";
-                                    root.new-project-dialog-open = true;
-                                }
-                            }
-
-                            Button {
-                                text: "Open Project";
-
-                                clicked => {
-                                    root.project-error = "";
-                                    root.refresh-projects();
-                                    root.open-project-dialog-open = true;
-                                }
+                        padding: 15px; spacing: 8px;
+                        Text { text: root.nexus-display-name; color: #f5f6f8; font-size: 27px; font-weight: 700; }
+                        Label { text: root.nexus-subtitle; }
+                        Rectangle { height: 8px; }
+                        Button { text: "Conversations"; clicked => { root.nexus-tab = 0; } }
+                        Button { text: "Characters"; clicked => { root.nexus-tab = 1; } }
+                        Button { text: "Media"; clicked => { root.nexus-tab = 2; } }
+                        if root.nexus-tab == 0: Button { text: "+ New Chat"; clicked => { root.new-conversation(); } }
+                        if root.nexus-tab == 0: Section { text: "CONVERSATIONS"; }
+                        if root.nexus-tab == 0: ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                for conversation in root.conversations: Button { text: conversation.title; clicked => { root.select-conversation(conversation.id); } }
                             }
                         }
+                        if root.nexus-tab != 0: Rectangle { vertical-stretch: 1; }
                     }
                 }
 
-                if root.project-open: Rectangle {
+                if root.nexus-tab == 0: Rectangle {
                     horizontal-stretch: 1;
-                    vertical-stretch: 1;
-
-                    background: #111318;
-                    border-radius: 8px;
-
                     HorizontalLayout {
                         spacing: 0px;
-
                         Rectangle {
-                            width: 300px;
-                            background: #181b20;
-
+                            horizontal-stretch: 1;
                             VerticalLayout {
-                                padding: 16px;
-                                spacing: 10px;
-
-                                Text {
-                                    text: root.current-project-name;
-                                    color: #f5f5f5;
-                                    font-size: 18px;
-                                    font-weight: 700;
-                                }
-
-                                Text {
-                                    text: "Project Shots";
-                                    color: #737982;
-                                    font-size: 12px;
-                                }
-
-                                Rectangle {
-                                    height: 4px;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 8px;
-
-                                    Button {
-                                        text: "+ Shot";
-
-                                        clicked => {
-                                            root.new-shot-title = "";
-                                            root.new-shot-brief = "";
-                                            root.shot-error = "";
-                                            root.new-shot-dialog-open = true;
-                                        }
-                                    }
-
-                                    Button {
-                                        text: "Projects";
-
-                                        clicked => {
-                                            root.project-error = "";
-                                            root.refresh-projects();
-                                            root.open-project-dialog-open = true;
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    height: 6px;
-                                }
-
-                                Text {
-                                    text: "SHOTS";
-                                    color: #737982;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                }
-
-                                if root.shots.length == 0: Text {
-                                    text: "No shots yet.";
-                                    color: #737982;
-                                    font-size: 13px;
-                                }
-
+                                padding: 19px; spacing: 9px;
+                                Text { text: root.current-conversation-title; color: #f5f6f8; font-size: 21px; font-weight: 700; }
+                                Label { text: "Chat is saved locally. No assistant reply is invented when no prompt compiler is available."; wrap: word-wrap; }
                                 ScrollView {
-                                    horizontal-stretch: 1;
                                     vertical-stretch: 1;
-
                                     VerticalLayout {
-                                        spacing: 6px;
-
-                                        for shot in root.shots: Button {
-                                            text: shot.label;
-
-                                            clicked => {
-                                                root.current-shot-number = shot.number;
-                                                root.current-shot-title = shot.title;
-                                                root.current-shot-brief = shot.brief;
+                                        spacing: 7px;
+                                        if root.messages.length == 0: Text { text: "Start a conversation."; color: #747c88; }
+                                        for message in root.messages: Rectangle {
+                                            background: message.role == "You" ? #252b35 : #202a25; border-radius: 7px; min-height: 58px;
+                                            VerticalLayout {
+                                                padding: 10px; spacing: 3px;
+                                                Text { text: message.role; color: #91a8ca; font-size: 11px; font-weight: 700; }
+                                                Text { text: message.content; color: #e1e4e8; wrap: word-wrap; }
                                             }
                                         }
                                     }
                                 }
+                                LineEdit { text <=> root.chat-input; placeholder-text: "Sarah walks through rainy Tokyo at night. Make it cinematic."; }
+                                HorizontalLayout {
+                                    Text { text: root.nexus-status; color: #838c99; font-size: 11px; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button { text: "Send"; clicked => { root.send-message(root.chat-input); root.chat-input = ""; } }
+                                }
                             }
                         }
-
                         Rectangle {
-                            width: 1px;
-                            background: #2c3037;
+                            width: 330px; background: #181b20;
+                            VerticalLayout {
+                                padding: 15px; spacing: 7px;
+                                Section { text: "GENERATION CONTEXT"; }
+                                Label { text: "Mode"; }
+                                ComboBox { model: ["Text to Image", "Image to Image", "Text to Video", "Image to Video", "Video to Video"]; current-index <=> root.mode-index; }
+                                Label { text: "Model"; }
+                                ComboBox { model: ["FLUX.2 [dev]", "LTX-2.5", "Wan 2.2"]; current-index <=> root.model-index; }
+                                Label { text: "Character: " + (root.selected-character-id == "" ? "None" : root.selected-character-id); wrap: word-wrap; }
+                                Label { text: "Reference: " + root.selected-reference-label; wrap: word-wrap; }
+                                Button { text: root.advanced-open ? "Hide Advanced" : "Advanced / Manual"; clicked => { root.advanced-open = !root.advanced-open; } }
+                                if root.advanced-open: Label { text: "Final prompt"; }
+                                if root.advanced-open: LineEdit { text <=> root.manual-prompt; placeholder-text: "Direct model prompt"; }
+                                if root.advanced-open: LineEdit { text <=> root.negative-prompt; placeholder-text: "Negative prompt (optional)"; }
+                                if root.advanced-open: LineEdit { text <=> root.dimensions; placeholder-text: "1024x1024"; }
+                                if root.advanced-open && root.mode-index >= 2: LineEdit { text <=> root.duration; placeholder-text: "Duration seconds"; }
+                                if root.advanced-open: LineEdit { text <=> root.manual-seed; placeholder-text: "Seed (blank = Auto)"; }
+                                Button {
+                                    text: "Generate";
+                                    clicked => { root.submit-generation(
+                                        root.mode-index == 0 ? "text_to_image" : root.mode-index == 1 ? "image_to_image" : root.mode-index == 2 ? "text_to_video" : root.mode-index == 3 ? "image_to_video" : "video_to_video",
+                                        root.model-index == 0 ? "flux-2-dev" : root.model-index == 1 ? "ltx-2.5" : "wan-2.2",
+                                        root.manual-prompt == "" ? root.chat-input : root.manual-prompt,
+                                        root.negative-prompt, root.manual-seed, root.dimensions, root.duration
+                                    ); }
+                                }
+                                Label { text: "Unsupported combinations are rejected before queueing."; wrap: word-wrap; }
+                                Rectangle { vertical-stretch: 1; }
+                            }
                         }
+                    }
+                }
 
+                if root.nexus-tab == 1: Rectangle {
+                    horizontal-stretch: 1;
+                    HorizontalLayout {
+                        Rectangle {
+                            width: 300px; background: #181b20;
+                            VerticalLayout {
+                                padding: 17px; spacing: 7px;
+                                Heading { text: "Characters"; }
+                                Button { text: "+ New Character"; clicked => { root.selected-character-id = ""; root.character-name = ""; root.character-description = ""; root.character-notes = ""; root.character-references = "No linked references"; } }
+                                ScrollView {
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        for character in root.characters: Button {
+                                            text: character.name;
+                                            clicked => { root.selected-character-id = character.id; root.character-name = character.name; root.character-description = character.description; root.character-notes = character.notes; root.character-references = character.references; root.select-character(character.id); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Rectangle {
                             horizontal-stretch: 1;
-                            background: #111318;
-
                             VerticalLayout {
-                                padding: 28px;
-                                spacing: 14px;
-
-                                if root.current-shot-number == 0: Text {
-                                    text: "No shot selected";
-                                    color: #d1d5db;
-                                    font-size: 20px;
+                                padding: 24px; spacing: 8px;
+                                Text { text: root.selected-character-id == "" ? "Create Character" : "Edit Character"; color: #f5f6f8; font-size: 22px; font-weight: 700; }
+                                Label { text: "Name"; } LineEdit { text <=> root.character-name; }
+                                Label { text: "Description"; } LineEdit { text <=> root.character-description; }
+                                Label { text: "Notes"; } LineEdit { text <=> root.character-notes; }
+                                Button { text: "Save Character"; clicked => { root.save-character(root.selected-character-id, root.character-name, root.character-description, root.character-notes); } }
+                                Section { text: "LINKED REFERENCES"; }
+                                Text { text: root.character-references; color: #b8bec7; wrap: word-wrap; }
+                                Label { text: "Select an image in Media, then attach or remove its association. The media file is retained."; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    Button { text: "Attach selected"; clicked => { root.attach-character-reference(root.selected-character-id, root.selected-reference-id); } }
+                                    Button { text: "Remove association"; clicked => { root.remove-character-reference(root.selected-character-id, root.selected-reference-id); } }
                                 }
+                                if root.character-status != "": Text { text: root.character-status; color: #aeb9c9; wrap: word-wrap; }
+                                Rectangle { vertical-stretch: 1; }
+                            }
+                        }
+                    }
+                }
 
-                                if root.current-shot-number == 0: Text {
-                                    text: "Create a shot or select one from the project browser.";
-                                    color: #737982;
-                                    font-size: 14px;
-                                    wrap: word-wrap;
-                                }
-
-                                if root.current-shot-number != 0: Text {
-                                    text: "SELECTED SHOT";
-                                    color: #737982;
-                                    font-size: 12px;
-                                    font-weight: 700;
-                                }
-
-                                if root.current-shot-number != 0: Text {
-                                    text: root.current-shot-title;
-                                    color: #f5f5f5;
-                                    font-size: 26px;
-                                    font-weight: 700;
-                                    wrap: word-wrap;
-                                }
-
-                                if root.current-shot-number != 0: Rectangle {
-                                    height: 12px;
-                                }
-
-                                if root.current-shot-number != 0: Text {
-                                    text: "BRIEF";
-                                    color: #737982;
-                                    font-size: 11px;
-                                    font-weight: 700;
-                                }
-
-                                if root.current-shot-number != 0: Text {
-                                    text: root.current-shot-brief;
-                                    color: #c6cbd2;
-                                    font-size: 15px;
-                                    wrap: word-wrap;
-                                }
-
-                                Rectangle {
-                                    vertical-stretch: 1;
-                                }
-
-                                if root.current-shot-number != 0: Text {
-                                    text: "Generation tools will appear here next.";
-                                    color: #555b64;
-                                    font-size: 12px;
+                if root.nexus-tab == 2: Rectangle {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        padding: 22px; spacing: 8px;
+                        Heading { text: "Local Media Library"; }
+                        Label { text: "Files stay under portaldata/apps/nexus; SQLite stores metadata only."; }
+                        HorizontalLayout {
+                            LineEdit { horizontal-stretch: 1; text <=> root.import-path; placeholder-text: "/absolute/path/to/file.png"; }
+                            ComboBox { width: 105px; model: ["Image", "Video", "Audio"]; current-index <=> root.import-kind-index; }
+                            Button { text: "Import"; clicked => { root.import-media(root.import-path, root.import-kind-index == 0 ? "image" : root.import-kind-index == 1 ? "video" : "audio"); } }
+                        }
+                        if root.media-status != "": Text { text: root.media-status; color: #aeb9c9; wrap: word-wrap; }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                if root.media-assets.length == 0: Text { text: "No local media yet."; color: #747c88; }
+                                for asset in root.media-assets: Rectangle {
+                                    background: #1b1f25; border-radius: 7px; min-height: 68px;
+                                    HorizontalLayout {
+                                        padding: 10px;
+                                        VerticalLayout {
+                                            Text { text: asset.kind + " · " + asset.details; color: #e0e4e9; font-weight: 700; }
+                                            Text { text: asset.path; color: #89919d; font-size: 11px; wrap: word-wrap; }
+                                        }
+                                        Button { text: "Use as reference"; clicked => { root.select-reference-media(asset.id); } }
+                                    }
                                 }
                             }
                         }
                     }
+                }
+            }
+        }
+
+        if root.active-app == 2: Rectangle {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                padding: 26px; spacing: 9px;
+                Heading { text: "Compute"; }
+                Label { text: "RunPod queue and local job history"; }
+                Rectangle {
+                    background: #1b1f25; border-radius: 7px; min-height: 88px;
+                    VerticalLayout {
+                        padding: 12px;
+                        Text { text: "RunPod: " + root.runpod-status; color: #e1e4e8; font-weight: 700; }
+                        Label { text: "LLM: " + (root.prompt-endpoint-id == "" ? "not configured" : root.prompt-endpoint-id); }
+                        Label { text: "Image: " + (root.image-endpoint-id == "" ? "not configured" : root.image-endpoint-id) + " · Video: " + (root.video-endpoint-id == "" ? "not configured" : root.video-endpoint-id); }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        if root.jobs.length == 0: Text { text: "No generation jobs yet."; color: #747c88; }
+                        for job in root.jobs: Rectangle {
+                            background: #1b1f25; border-radius: 7px; min-height: 65px;
+                            VerticalLayout {
+                                padding: 10px;
+                                Text { text: job.status + " · " + job.model; color: #e1e4e8; font-weight: 700; }
+                                Label { text: job.details; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.active-app == 3: Rectangle {
+            horizontal-stretch: 1;
+            ScrollView {
+                VerticalLayout {
+                    padding: 28px; spacing: 9px;
+                    Heading { text: "Settings"; }
+                    Text { text: "RunPod"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
+                    Label { text: "Status: " + root.runpod-status; }
+                    Label { text: "API key (blank keeps current key)"; }
+                    LineEdit { text <=> root.api-key-entry; placeholder-text: "Stored in the operating system keyring"; input-type: password; }
+                    Label { text: "Prompt / LLM endpoint ID"; } LineEdit { text <=> root.prompt-endpoint-id; }
+                    Label { text: "Image endpoint ID"; } LineEdit { text <=> root.image-endpoint-id; }
+                    Label { text: "Video endpoint ID"; } LineEdit { text <=> root.video-endpoint-id; }
+                    Rectangle { height: 10px; }
+                    Text { text: "Prompt Compiler"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
+                    ComboBox { model: ["Manual / Disabled", "Local HTTP LLM", "RunPod LLM endpoint"]; current-index <=> root.prompt-compiler-index; }
+                    if root.prompt-compiler-index == 1: Label { text: "Local OpenAI-compatible URL"; }
+                    if root.prompt-compiler-index == 1: LineEdit { text <=> root.local-http-url; }
+                    Label { text: "No fake assistant response is generated when the compiler is unavailable."; wrap: word-wrap; }
+                    Rectangle { height: 10px; }
+                    Text { text: "Local Storage"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
+                    Text { text: "Nexus app data: " + root.storage-path; color: #aeb4be; wrap: word-wrap; }
+                    Button { text: "Save Settings"; clicked => { root.save-settings(root.api-key-entry, root.prompt-endpoint-id, root.image-endpoint-id, root.video-endpoint-id, root.prompt-compiler-index == 0 ? "manual" : root.prompt-compiler-index == 1 ? "local_http" : "runpod", root.local-http-url); root.api-key-entry = ""; } }
+                    if root.settings-status != "": Text { text: root.settings-status; color: #aeb9c9; wrap: word-wrap; }
                 }
             }
         }
     }
 
     if root.new-project-dialog-open: Rectangle {
-        x: 0px;
-        y: 0px;
-
-        width: parent.width;
-        height: parent.height;
-
-        background: #aa000000;
-
-        TouchArea {
-            width: parent.width;
-            height: parent.height;
-        }
-
+        x: 0px; y: 0px; width: parent.width; height: parent.height; background: #aa000000;
+        TouchArea { width: parent.width; height: parent.height; }
         Rectangle {
-            width: 420px;
-            height: 240px;
-
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-
-            background: #24272e;
-            border-radius: 8px;
-
+            width: 420px; height: 240px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #24272e; border-radius: 8px;
             VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
-
-                Text {
-                    text: "New Project";
-                    color: #f5f5f5;
-                    font-size: 22px;
-                    font-weight: 700;
-                }
-
-                Text {
-                    text: "Project name";
-                    color: #a5abb5;
-                    font-size: 13px;
-                }
-
-                LineEdit {
-                    text <=> root.new-project-name;
-                    placeholder-text: "My Series";
-                }
-
-                if root.project-error != "": Text {
-                    text: root.project-error;
-                    color: #ff7b7b;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                }
-
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 10px;
-
-                    Button {
-                        text: "Cancel";
-
-                        clicked => {
-                            root.new-project-dialog-open = false;
-                            root.project-error = "";
-                        }
-                    }
-
-                    Button {
-                        text: "Create";
-
-                        clicked => {
-                            root.create-project(
-                                root.new-project-name
-                            );
-                        }
-                    }
-                }
+                padding: 22px; spacing: 9px;
+                Text { text: "New Project"; color: #f5f6f8; font-size: 22px; font-weight: 700; }
+                LineEdit { text <=> root.new-project-name; placeholder-text: "My Series"; }
+                if root.project-error != "": Text { text: root.project-error; color: #ff8282; wrap: word-wrap; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout { alignment: end; Button { text: "Cancel"; clicked => { root.new-project-dialog-open = false; } } Button { text: "Create"; clicked => { root.create-project(root.new-project-name); } } }
             }
         }
     }
-
     if root.new-shot-dialog-open: Rectangle {
-        x: 0px;
-        y: 0px;
-
-        width: parent.width;
-        height: parent.height;
-
-        background: #aa000000;
-
-        TouchArea {
-            width: parent.width;
-            height: parent.height;
-        }
-
+        x: 0px; y: 0px; width: parent.width; height: parent.height; background: #aa000000;
+        TouchArea { width: parent.width; height: parent.height; }
         Rectangle {
-            width: 480px;
-            height: 330px;
-
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-
-            background: #24272e;
-            border-radius: 8px;
-
+            width: 470px; height: 310px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #24272e; border-radius: 8px;
             VerticalLayout {
-                padding: 24px;
-                spacing: 12px;
-
-                Text {
-                    text: "New Shot";
-                    color: #f5f5f5;
-                    font-size: 22px;
-                    font-weight: 700;
-                }
-
-                Text {
-                    text: "Title";
-                    color: #a5abb5;
-                    font-size: 13px;
-                }
-
-                LineEdit {
-                    text <=> root.new-shot-title;
-                    placeholder-text: "Laura enters the kitchen";
-                }
-
-                Text {
-                    text: "Brief";
-                    color: #a5abb5;
-                    font-size: 13px;
-                }
-
-                LineEdit {
-                    text <=> root.new-shot-brief;
-                    placeholder-text: "Describe what happens...";
-                }
-
-                if root.shot-error != "": Text {
-                    text: root.shot-error;
-                    color: #ff7b7b;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                }
-
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 10px;
-
-                    Button {
-                        text: "Cancel";
-
-                        clicked => {
-                            root.new-shot-dialog-open = false;
-                            root.shot-error = "";
-                        }
-                    }
-
-                    Button {
-                        text: "Create";
-
-                        clicked => {
-                            root.create-shot(
-                                root.new-shot-title,
-                                root.new-shot-brief
-                            );
-                        }
-                    }
-                }
+                padding: 22px; spacing: 8px;
+                Text { text: "New Shot"; color: #f5f6f8; font-size: 22px; font-weight: 700; }
+                Label { text: "Title"; } LineEdit { text <=> root.new-shot-title; }
+                Label { text: "Brief"; } LineEdit { text <=> root.new-shot-brief; }
+                if root.shot-error != "": Text { text: root.shot-error; color: #ff8282; wrap: word-wrap; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout { alignment: end; Button { text: "Cancel"; clicked => { root.new-shot-dialog-open = false; } } Button { text: "Create"; clicked => { root.create-shot(root.new-shot-title, root.new-shot-brief); } } }
             }
         }
     }
-
     if root.open-project-dialog-open: Rectangle {
-        x: 0px;
-        y: 0px;
-
-        width: parent.width;
-        height: parent.height;
-
-        background: #aa000000;
-
-        TouchArea {
-            width: parent.width;
-            height: parent.height;
-        }
-
+        x: 0px; y: 0px; width: parent.width; height: parent.height; background: #aa000000;
+        TouchArea { width: parent.width; height: parent.height; }
         Rectangle {
-            width: 500px;
-            height: 440px;
-
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-
-            background: #24272e;
-            border-radius: 8px;
-
+            width: 500px; height: 440px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #24272e; border-radius: 8px;
             VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
-
-                Text {
-                    text: "Open Project";
-                    color: #f5f5f5;
-                    font-size: 22px;
-                    font-weight: 700;
-                }
-
-                Text {
-                    text: "Projects in portaldata/projects";
-                    color: #737982;
-                    font-size: 13px;
-                }
-
-                if root.project-error != "": Text {
-                    text: root.project-error;
-                    color: #ff7b7b;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                if root.available-projects.length == 0: Text {
-                    text: "No projects found.";
-                    color: #737982;
-                    font-size: 14px;
-                }
-
-                ScrollView {
-                    horizontal-stretch: 1;
-                    vertical-stretch: 1;
-
-                    VerticalLayout {
-                        spacing: 8px;
-
-                        for project in root.available-projects: Button {
-                            text: project.name;
-
-                            clicked => {
-                                root.open-project(
-                                    project.folder-name
-                                );
-                            }
-                        }
-                    }
-                }
-
-                HorizontalLayout {
-                    alignment: end;
-
-                    Button {
-                        text: "Cancel";
-
-                        clicked => {
-                            root.open-project-dialog-open = false;
-                            root.project-error = "";
-                        }
-                    }
-                }
+                padding: 22px; spacing: 9px;
+                Text { text: "Open Project"; color: #f5f6f8; font-size: 22px; font-weight: 700; }
+                ScrollView { vertical-stretch: 1; VerticalLayout { for project in root.available-projects: Button { text: project.name; clicked => { root.open-project(project.folder-name); } } } }
+                Button { text: "Close"; clicked => { root.open-project-dialog-open = false; } }
             }
         }
     }
