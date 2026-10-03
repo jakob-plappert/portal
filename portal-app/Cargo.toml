@@ -1,10 +1,11 @@
 [package]
 name = "portal"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 build = "build.rs"
 
 [dependencies]
+arboard = { version = "3.6", default-features = false }
 slint = "1.18"
 base64 = "0.23"
 keyring = "4.2"

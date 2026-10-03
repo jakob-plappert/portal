@@ -3,8 +3,10 @@ use crate::project::Project;
 use crate::provisioning::{InfrastructureWorker, ProvisioningState, ProvisioningStateStore};
 use crate::runpod::RunPodWorker;
 use crate::settings::{ApiKeyState, PortalSettings, SettingsStore, load_runpod_api_key};
+use crate::setup::SetupSession;
 use crate::shot::Shot;
 use crate::storage::NexusStore;
+use std::sync::{Arc, Mutex};
 
 pub struct AppState {
     // `None` represents the normal startup state in which no project has been
@@ -26,6 +28,11 @@ pub struct AppState {
     pub api_key: ApiKeyState,
     pub runpod_worker: Option<RunPodWorker>,
     pub infrastructure_worker: Option<InfrastructureWorker>,
+    // The setup worker runs outside Slint's UI thread, so this small transient
+    // state uses `Arc<Mutex<_>>`: `Arc` gives both threads ownership and
+    // `Mutex` ensures only one can mutate the state at a time. Durable resource
+    // identity still lives in `ProvisioningState`, not in this UI session.
+    pub setup_session: Arc<Mutex<SetupSession>>,
     pub provisioning_state_store: ProvisioningStateStore,
     pub provisioning_state: ProvisioningState,
     pub current_conversation_id: Option<String>,
@@ -42,6 +49,8 @@ impl AppState {
         let settings = settings_store.load()?;
         let provisioning_state_store = ProvisioningStateStore::new(paths.infrastructure_path());
         let provisioning_state = provisioning_state_store.load()?;
+        let api_key = load_runpod_api_key();
+        let setup_session = Arc::new(Mutex::new(SetupSession::new(api_key.value.is_some())));
 
         Ok(Self {
             current_project: None,
@@ -50,9 +59,10 @@ impl AppState {
             nexus_store,
             settings_store,
             settings,
-            api_key: load_runpod_api_key(),
+            api_key,
             runpod_worker: None,
             infrastructure_worker: None,
+            setup_session,
             provisioning_state_store,
             provisioning_state,
             current_conversation_id: None,

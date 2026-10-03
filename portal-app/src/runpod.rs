@@ -244,6 +244,11 @@ impl RunPodWorker {
                         endpoint_id,
                         request,
                     } => {
+                        on_event(RunPodEvent::Updated {
+                            local_job_id: local_job_id.clone(),
+                            status: JobStatus::Preparing,
+                            message: String::from("Submitting to RunPod."),
+                        });
                         let model_id = request.model_id.clone();
                         let result = RunPodQueueClient::new(api_key).and_then(|client| {
                             let remote = client.submit_job(&endpoint_id, &request)?;
@@ -260,7 +265,10 @@ impl RunPodWorker {
                             on_event(RunPodEvent::Updated {
                                 local_job_id: local_job_id.clone(),
                                 status: JobStatus::Queued,
-                                message: format!("Queued on RunPod ({}).", remote.status),
+                                message: format!(
+                                    "Waiting for a RunPod Serverless worker ({}). First FLUX.2 startup may take significantly longer while model files are downloaded to the Network Volume.",
+                                    remote.status
+                                ),
                             });
                             poll_until_terminal(
                                 &client,
@@ -275,10 +283,19 @@ impl RunPodWorker {
                         });
                         match result {
                             Ok(()) => {}
-                            Err(error) => on_event(RunPodEvent::Failed {
-                                local_job_id: local_job_id.clone(),
-                                error,
-                            }),
+                            Err(error) => {
+                                let _ = store.update_job(
+                                    &local_job_id,
+                                    JobStatus::Failed,
+                                    None,
+                                    None,
+                                    Some(&error),
+                                );
+                                on_event(RunPodEvent::Failed {
+                                    local_job_id: local_job_id.clone(),
+                                    error,
+                                });
+                            }
                         }
                     }
                     RunPodCommand::Reconcile {
@@ -301,6 +318,13 @@ impl RunPodWorker {
                             )
                         });
                         if let Err(error) = result {
+                            let _ = store.update_job(
+                                &local_job_id,
+                                JobStatus::Failed,
+                                None,
+                                None,
+                                Some(&error),
+                            );
                             on_event(RunPodEvent::Failed {
                                 local_job_id,
                                 error,
@@ -346,14 +370,14 @@ fn poll_until_terminal(
                         on_event,
                         local_job_id,
                         JobStatus::Queued,
-                        "Waiting in the RunPod queue.",
+                        "Waiting for a RunPod Serverless worker. A cold start may take time; first FLUX.2 startup may also download about 54 GB to the Network Volume.",
                     )?,
                     QueueStatus::Running => update_progress(
                         store,
                         on_event,
                         local_job_id,
                         JobStatus::Running,
-                        "FLUX.2 worker is running.",
+                        "RunPod reports IN_PROGRESS. The worker may be starting, downloading first-use FLUX.2 model files, or generating; RunPod does not expose a reliable percentage here.",
                     )?,
                     QueueStatus::Completed => {
                         if let Some(execution_time) = remote.execution_time_ms {
@@ -442,6 +466,26 @@ fn ingest_completed_output(
     output: Option<serde_json::Value>,
     on_event: &impl Fn(RunPodEvent),
 ) -> Result<(), String> {
+    let result =
+        ingest_completed_output_inner(store, paths, local_job_id, model_id, output, on_event);
+    if let Err(error) = &result {
+        // A provider-side COMPLETED state is not a local completion. Persist a
+        // terminal failure when download, validation, filesystem, or SQLite
+        // ingestion fails so restart reconciliation cannot leave the row stuck
+        // forever in Downloading.
+        store.update_job(local_job_id, JobStatus::Failed, None, None, Some(error))?;
+    }
+    result
+}
+
+fn ingest_completed_output_inner(
+    store: &NexusStore,
+    paths: &PortalPaths,
+    local_job_id: &str,
+    model_id: &str,
+    output: Option<serde_json::Value>,
+    on_event: &impl Fn(RunPodEvent),
+) -> Result<(), String> {
     let output = output.ok_or_else(|| String::from("Completed RunPod job returned no output."))?;
     let response: MediaWorkerResponse = serde_json::from_value(output)
         .map_err(|error| format!("Worker returned an invalid media response: {error}"))?;
@@ -459,7 +503,7 @@ fn ingest_completed_output(
         on_event,
         local_job_id,
         JobStatus::Downloading,
-        "Downloading generated media to Nexus local storage.",
+        "Receiving the result and saving the PNG to Nexus local storage.",
     )?;
     let library = MediaLibrary::new(paths.clone(), store.clone());
     let mut first_media_id = None;
@@ -467,6 +511,13 @@ fn ingest_completed_output(
         let asset = library.receive_remote_artifact(artifact, local_job_id, model_id)?;
         first_media_id.get_or_insert(asset.id);
     }
+    update_progress(
+        store,
+        on_event,
+        local_job_id,
+        JobStatus::Downloading,
+        "Registering the locally saved media with the generation job.",
+    )?;
     let output_media_id = first_media_id
         .as_deref()
         .ok_or_else(|| String::from("No media was ingested from the completed job."))?;
@@ -482,7 +533,9 @@ fn ingest_completed_output(
     on_event(RunPodEvent::Updated {
         local_job_id: local_job_id.to_string(),
         status: JobStatus::Completed,
-        message: String::from("Generation completed and was saved to the local Media Library."),
+        message: String::from(
+            "Complete. The PNG is local and its metadata is registered in SQLite.",
+        ),
     });
     Ok(())
 }
@@ -671,7 +724,13 @@ mod tests {
             .into_iter()
             .find(|item| item.id == job.id)
             .expect("job should remain");
-        assert_ne!(loaded.status, JobStatus::Completed);
+        assert_eq!(loaded.status, JobStatus::Failed);
+        assert!(
+            loaded
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("decode"))
+        );
         assert!(loaded.output_media_id.is_none());
     }
 }

@@ -5,8 +5,9 @@ export struct ShotListItem { number: int, title: string, brief: string, label: s
 export struct ConversationListItem { id: string, title: string }
 export struct MessageListItem { id: string, role: string, content: string }
 export struct CharacterListItem { id: string, name: string, description: string, notes: string, references: string }
-export struct MediaListItem { id: string, kind: string, path: string, details: string }
+export struct MediaListItem { id: string, kind: string, path: string, details: string, preview: image, job-status: string, prompt-summary: string }
 export struct JobListItem { id: string, status: string, model: string, details: string }
+export struct DiagnosticListItem { status: string, name: string, summary: string, detail: string }
 
 component Heading inherits Text { color: #f5f6f8; font-size: 28px; font-weight: 700; }
 component Label inherits Text { color: #9da5b1; font-size: 12px; }
@@ -27,11 +28,17 @@ export component MainWindow inherits Window {
     callback remove-character-reference(string, string);
     callback import-media(string, string);
     callback select-reference-media(string);
+    callback select-media-preview(string);
     callback submit-generation(string, string, string, string, string, string, string);
     callback save-settings(string, string, string, string, string, string);
+    callback run-preflight();
     callback plan-infrastructure(string);
     callback apply-infrastructure();
-    callback check-runpod();
+    callback request-test-generation();
+    callback confirm-test-generation(string);
+    callback cancel-test-generation();
+    callback copy-diagnostic-report();
+    callback open-data-folder();
 
     in-out property <int> active-app: 1;
     in-out property <int> nexus-tab: 0;
@@ -59,6 +66,7 @@ export component MainWindow inherits Window {
     in-out property <[CharacterListItem]> characters: [];
     in-out property <[MediaListItem]> media-assets: [];
     in-out property <[JobListItem]> jobs: [];
+    in-out property <[DiagnosticListItem]> setup-diagnostics: [];
     in-out property <string> current-conversation-id: "";
     in-out property <string> current-conversation-title: "New conversation";
     in-out property <string> selected-character-id: "";
@@ -81,6 +89,18 @@ export component MainWindow inherits Window {
     in-out property <string> volume-resource: "Not configured";
     in-out property <string> endpoint-resource: "Not configured";
     in-out property <string> cost-status: "Current account balance and Serverless rate are not exposed by the available RunPod REST API v2.";
+    in-out property <string> setup-state-label: "Not configured";
+    in-out property <int> setup-stage: 0;
+    in-out property <string> worker-image: "ghcr.io/jakob-plappert/portal-comfy-worker:0.6.0";
+    in-out property <string> worker-image-status: "Not checked";
+    in-out property <string> local-storage-status: "Not checked";
+    in-out property <string> apply-progress: "";
+    in-out property <bool> test-generation-dialog-open: false;
+    in-out property <image> selected-media-preview;
+    in-out property <string> selected-media-path: "";
+    in-out property <string> selected-media-details: "";
+    in-out property <string> selected-media-job-status: "";
+    in-out property <string> selected-media-prompt: "";
 
     private property <string> new-project-name: "";
     private property <string> new-shot-title: "";
@@ -102,6 +122,7 @@ export component MainWindow inherits Window {
     private property <int> import-kind-index: 0;
     private property <string> api-key-entry: "";
     private property <string> volume-size-gb: "150";
+    private property <string> test-prompt: "A small red ceramic robot standing on a wooden desk, studio photograph, soft daylight, highly detailed";
 
     function clear-generation-preview() {
         root.generation-ready = false; root.generation-prompt = "";
@@ -127,7 +148,7 @@ export component MainWindow inherits Window {
                 Button { text: "Compute"; clicked => { root.active-app = 2; } }
                 Button { text: "Settings"; clicked => { root.active-app = 3; } }
                 Rectangle { vertical-stretch: 1; }
-                Text { text: "Prototype 0.6.0"; color: #737b87; font-size: 11px; }
+                Text { text: "Portal 0.7.0"; color: #737b87; font-size: 11px; }
             }
         }
 
@@ -328,31 +349,55 @@ export component MainWindow inherits Window {
 
                 if root.nexus-tab == 2: Rectangle {
                     horizontal-stretch: 1;
-                    VerticalLayout {
-                        padding: 22px; spacing: 8px;
-                        Heading { text: "Local Media Library"; }
-                        Label { text: "Files stay under portaldata/apps/nexus; SQLite stores metadata only."; }
-                        HorizontalLayout {
-                            LineEdit { horizontal-stretch: 1; text <=> root.import-path; placeholder-text: "/absolute/path/to/file.png"; }
-                            ComboBox { width: 105px; model: ["Image", "Video", "Audio"]; current-index <=> root.import-kind-index; }
-                            Button { text: "Import"; clicked => { root.import-media(root.import-path, root.import-kind-index == 0 ? "image" : root.import-kind-index == 1 ? "video" : "audio"); } }
-                        }
-                        if root.media-status != "": Text { text: root.media-status; color: #aeb9c9; wrap: word-wrap; }
-                        ScrollView {
-                            vertical-stretch: 1;
+                    HorizontalLayout {
+                        spacing: 0px;
+                        Rectangle {
+                            horizontal-stretch: 1;
                             VerticalLayout {
-                                if root.media-assets.length == 0: Text { text: "No local media yet."; color: #747c88; }
-                                for asset in root.media-assets: Rectangle {
-                                    background: #1b1f25; border-radius: 7px; min-height: 68px;
-                                    HorizontalLayout {
-                                        padding: 10px;
-                                        VerticalLayout {
-                                            Text { text: asset.kind + " · " + asset.details; color: #e0e4e9; font-weight: 700; }
-                                            Text { text: asset.path; color: #89919d; font-size: 11px; wrap: word-wrap; }
+                                padding: 22px; spacing: 8px;
+                                Heading { text: "Local Media Library"; }
+                                Label { text: "Files stay under portaldata/apps/nexus; SQLite stores metadata only."; }
+                                HorizontalLayout {
+                                    LineEdit { horizontal-stretch: 1; text <=> root.import-path; placeholder-text: "/absolute/path/to/file.png"; }
+                                    ComboBox { width: 105px; model: ["Image", "Video", "Audio"]; current-index <=> root.import-kind-index; }
+                                    Button { text: "Import"; clicked => { root.import-media(root.import-path, root.import-kind-index == 0 ? "image" : root.import-kind-index == 1 ? "video" : "audio"); } }
+                                }
+                                if root.media-status != "": Text { text: root.media-status; color: #aeb9c9; wrap: word-wrap; }
+                                ScrollView {
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        if root.media-assets.length == 0: Text { text: "No local media yet."; color: #747c88; }
+                                        for asset in root.media-assets: Rectangle {
+                                            background: #1b1f25; border-radius: 7px; min-height: 105px;
+                                            HorizontalLayout {
+                                                padding: 10px; spacing: 10px;
+                                                Image { width: 88px; height: 88px; source: asset.preview; image-fit: contain; }
+                                                VerticalLayout {
+                                                    Text { text: asset.kind + " · " + asset.details; color: #e0e4e9; font-weight: 700; }
+                                                    Text { text: asset.job-status; color: #9fb3cf; font-size: 11px; }
+                                                    Text { text: asset.path; color: #89919d; font-size: 11px; wrap: word-wrap; }
+                                                    Text { text: asset.prompt-summary; color: #aeb4be; font-size: 11px; wrap: word-wrap; }
+                                                }
+                                                VerticalLayout {
+                                                    Button { text: "Preview"; clicked => { root.selected-media-preview = asset.preview; root.selected-media-path = asset.path; root.selected-media-details = asset.details; root.selected-media-job-status = asset.job-status; root.selected-media-prompt = asset.prompt-summary; root.select-media-preview(asset.id); } }
+                                                    Button { text: "Use as reference"; clicked => { root.select-reference-media(asset.id); } }
+                                                }
+                                            }
                                         }
-                                        Button { text: "Use as reference"; clicked => { root.select-reference-media(asset.id); } }
                                     }
                                 }
+                            }
+                        }
+                        if root.selected-media-path != "": Rectangle {
+                            width: 390px; background: #181b20;
+                            VerticalLayout {
+                                padding: 16px; spacing: 8px;
+                                Text { text: "Preview"; color: #f5f6f8; font-size: 20px; font-weight: 700; }
+                                Image { horizontal-stretch: 1; vertical-stretch: 1; source: root.selected-media-preview; image-fit: contain; }
+                                Text { text: root.selected-media-details; color: #e0e4e9; font-weight: 700; }
+                                Label { text: root.selected-media-job-status; }
+                                Label { text: root.selected-media-path; wrap: word-wrap; }
+                                Text { text: root.selected-media-prompt; color: #aeb4be; wrap: word-wrap; }
                             }
                         }
                     }
@@ -374,7 +419,12 @@ export component MainWindow inherits Window {
                         Label { text: "Network Volume: " + root.volume-resource; wrap: word-wrap; }
                         Label { text: "FLUX.2 Endpoint: " + root.endpoint-resource; wrap: word-wrap; }
                         Label { text: root.cost-status; wrap: word-wrap; }
-                        Button { text: "Refresh / Plan Nexus Infrastructure"; clicked => { root.plan-infrastructure(root.volume-size-gb); } }
+                        Text { text: "Setup: " + root.setup-state-label; color: #d6dbe2; font-weight: 700; }
+                        HorizontalLayout {
+                            Button { text: "Run Preflight"; clicked => { root.run-preflight(); } }
+                            Button { enabled: root.setup-stage == 4 || root.setup-stage == 8 || root.setup-stage == 11; text: "Plan Infrastructure"; clicked => { root.plan-infrastructure(root.volume-size-gb); } }
+                            Button { enabled: root.setup-stage == 8 || root.setup-stage == 11; text: "Generate Test Image"; clicked => { root.request-test-generation(); } }
+                        }
                     }
                 }
                 if root.infrastructure-plan-visible: Rectangle {
@@ -390,6 +440,7 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                if root.apply-progress != "": Text { text: root.apply-progress; color: #b9c4bc; wrap: word-wrap; }
                 ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
@@ -413,16 +464,33 @@ export component MainWindow inherits Window {
                 VerticalLayout {
                     padding: 28px; spacing: 9px;
                     Heading { text: "Settings"; }
-                    Text { text: "RunPod"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
-                    Label { text: "Status: " + root.runpod-status; }
+                    Text { text: "Nexus Compute Setup"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
+                    Text { text: "Setup state: " + root.setup-state-label; color: #d6dbe2; font-weight: 700; }
+                    Label { text: "RunPod API: " + root.runpod-status; }
                     Label { text: "API key (blank keeps current key)"; }
                     LineEdit { text <=> root.api-key-entry; placeholder-text: "Stored in the operating system keyring"; input-type: password; }
-                    Button { text: "Save & Check"; clicked => { root.save-settings(root.api-key-entry, root.prompt-endpoint-id, root.image-endpoint-id, root.video-endpoint-id, root.prompt-compiler-index == 0 ? "manual" : root.prompt-compiler-index == 1 ? "local_http" : "runpod", root.local-http-url); root.api-key-entry = ""; root.check-runpod(); } }
+                    Label { text: "Worker image: " + root.worker-image; wrap: word-wrap; }
+                    Label { text: "Worker image status: " + root.worker-image-status; wrap: word-wrap; }
+                    Label { text: "Local storage: " + root.local-storage-status; wrap: word-wrap; }
+                    Button { text: "Save & Run Preflight"; clicked => { root.save-settings(root.api-key-entry, root.prompt-endpoint-id, root.image-endpoint-id, root.video-endpoint-id, root.prompt-compiler-index == 0 ? "manual" : root.prompt-compiler-index == 1 ? "local_http" : "runpod", root.local-http-url); root.api-key-entry = ""; root.run-preflight(); } }
+                    if root.setup-diagnostics.length > 0: Section { text: "PREFLIGHT CHECKS"; }
+                    for check in root.setup-diagnostics: Rectangle {
+                        background: #1b1f25; border-radius: 6px; min-height: 64px;
+                        VerticalLayout {
+                            padding: 8px; spacing: 2px;
+                            Text { text: check.status + " · " + check.name; color: #e1e4e8; font-weight: 700; }
+                            Text { text: check.summary; color: #b7bec8; wrap: word-wrap; }
+                            Label { text: check.detail; wrap: word-wrap; }
+                        }
+                    }
                     Label { text: "Nexus model/cache Network Volume size (GB)"; }
                     LineEdit { text <=> root.volume-size-gb; }
-                    Button { text: "Plan Nexus Infrastructure"; clicked => { root.plan-infrastructure(root.volume-size-gb); root.active-app = 2; } }
+                    Button { enabled: root.setup-stage == 4 || root.setup-stage == 8 || root.setup-stage == 11; text: "Plan Infrastructure"; clicked => { root.plan-infrastructure(root.volume-size-gb); root.active-app = 2; } }
+                    Rectangle { height: 10px; }
+                    Text { text: "Advanced / Manual Overrides"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
+                    Label { text: "Managed FLUX.2 infrastructure is used automatically. These legacy IDs are only manual fallbacks."; wrap: word-wrap; }
                     Label { text: "Prompt / LLM endpoint ID"; } LineEdit { text <=> root.prompt-endpoint-id; }
-                    Label { text: "Image endpoint ID"; } LineEdit { text <=> root.image-endpoint-id; }
+                    Label { text: "Image endpoint ID fallback"; } LineEdit { text <=> root.image-endpoint-id; }
                     Label { text: "Video endpoint ID"; } LineEdit { text <=> root.video-endpoint-id; }
                     Rectangle { height: 10px; }
                     Text { text: "Prompt Compiler"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
@@ -433,6 +501,10 @@ export component MainWindow inherits Window {
                     Rectangle { height: 10px; }
                     Text { text: "Local Storage"; color: #e0e3e7; font-size: 19px; font-weight: 700; }
                     Text { text: "Nexus app data: " + root.storage-path; color: #aeb4be; wrap: word-wrap; }
+                    HorizontalLayout {
+                        Button { text: "Open Data Folder"; clicked => { root.open-data-folder(); } }
+                        Button { text: "Copy Diagnostic Report"; clicked => { root.copy-diagnostic-report(); } }
+                    }
                     Button { text: "Save Settings"; clicked => { root.save-settings(root.api-key-entry, root.prompt-endpoint-id, root.image-endpoint-id, root.video-endpoint-id, root.prompt-compiler-index == 0 ? "manual" : root.prompt-compiler-index == 1 ? "local_http" : "runpod", root.local-http-url); root.api-key-entry = ""; } }
                     if root.settings-status != "": Text { text: root.settings-status; color: #aeb9c9; wrap: word-wrap; }
                 }
@@ -481,6 +553,27 @@ export component MainWindow inherits Window {
                 Text { text: "Open Project"; color: #f5f6f8; font-size: 22px; font-weight: 700; }
                 ScrollView { vertical-stretch: 1; VerticalLayout { for project in root.available-projects: Button { text: project.name; clicked => { root.open-project(project.folder-name); } } } }
                 Button { text: "Close"; clicked => { root.open-project-dialog-open = false; } }
+            }
+        }
+    }
+    if root.test-generation-dialog-open: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height; background: #aa000000;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: 620px; height: 350px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; background: #24272e; border-radius: 8px;
+            VerticalLayout {
+                padding: 22px; spacing: 9px;
+                Text { text: "Generate FLUX.2 Test Image"; color: #f5f6f8; font-size: 22px; font-weight: 700; }
+                Text { text: "This will start a RunPod Serverless worker and may incur compute charges. The first generation may also download approximately 54 GB of FLUX.2 model files to the persistent Network Volume."; color: #ffc77d; wrap: word-wrap; }
+                Label { text: "TextToImage · FLUX.2 [dev] · 1024 × 1024 · Auto seed"; }
+                Label { text: "Editable test prompt"; }
+                LineEdit { text <=> root.test-prompt; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    alignment: end;
+                    Button { text: "Cancel"; clicked => { root.cancel-test-generation(); root.test-generation-dialog-open = false; } }
+                    Button { text: "Generate Test Image"; clicked => { root.confirm-test-generation(root.test-prompt); root.test-generation-dialog-open = false; } }
+                }
             }
         }
     }

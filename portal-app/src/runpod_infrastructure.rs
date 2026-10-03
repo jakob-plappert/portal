@@ -165,15 +165,41 @@ impl RunPodInfrastructureClient {
         })
     }
 
-    /// Listing volumes is a harmless authenticated read and therefore a safe
-    /// way to validate both the key and its infrastructure permissions.
-    pub fn validate_api_key(&self) -> Result<(), String> {
-        self.list_network_volumes().map(|_| ())
-    }
-
     pub fn list_endpoints(&self) -> Result<Vec<Endpoint>, String> {
-        let response: wire::ListEndpointsResponse = self.get("/v2/serverless")?;
-        Ok(response.endpoints)
+        // The current official REST v2 OpenAPI cursor-paginates Serverless
+        // endpoints. Following its returned cursor is important for accounts
+        // with many endpoints; otherwise Nexus could miss an existing managed
+        // endpoint and propose a duplicate billable resource.
+        let mut endpoints = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut request = self
+                .agent
+                .get(format!("{}/v2/serverless", self.base_url))
+                .header("Authorization", &format!("Bearer {}", self.api_key))
+                .query("limit", "1000");
+            if let Some(cursor) = cursor.as_deref() {
+                request = request.query("cursor", cursor);
+            }
+            let response = request.call().map_err(provider_error)?;
+            let page: wire::ListEndpointsResponse = read_json(response, "endpoint list")?;
+            endpoints.extend(page.endpoints);
+            if !page.pagination.has_next_page {
+                break;
+            }
+            let next_cursor = page.pagination.next_cursor.ok_or_else(|| {
+                String::from(
+                    "RunPod endpoint list said another page exists but returned no cursor.",
+                )
+            })?;
+            if cursor.as_deref() == Some(next_cursor.as_str()) {
+                return Err(String::from(
+                    "RunPod endpoint pagination repeated a cursor; discovery stopped safely.",
+                ));
+            }
+            cursor = Some(next_cursor);
+        }
+        Ok(endpoints)
     }
 
     pub fn get_endpoint(&self, id: &str) -> Result<Endpoint, String> {
@@ -320,6 +346,16 @@ mod wire {
     #[derive(Deserialize)]
     pub struct ListEndpointsResponse {
         pub endpoints: Vec<Endpoint>,
+        #[serde(default)]
+        pub pagination: Pagination,
+    }
+
+    #[derive(Default, Deserialize)]
+    pub struct Pagination {
+        #[serde(rename = "nextCursor")]
+        pub next_cursor: Option<String>,
+        #[serde(rename = "hasNextPage", default)]
+        pub has_next_page: bool,
     }
 
     #[derive(Deserialize)]
@@ -375,7 +411,7 @@ mod tests {
                 "id":"NVIDIA L40S", "name":"L40S", "pool":"ADA_48",
                 "manufacturer":"NVIDIA", "memory":48,
                 "secure":true, "community":true,
-                "price":{"secure":0.8,"community":0.6},
+                "price":{"secure":0.8,"community":0.6,"serverless":1.1},
                 "maxCount":{"secure":8,"community":4},
                 "availability":"HIGH",
                 "dataCenters":[{"id":"EU-RO-1","name":"Romania","availability":"HIGH"}]
@@ -389,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_listing_parses_current_shape_without_pagination() {
+    fn endpoint_listing_parses_current_openapi_shape() {
         let endpoints: wire::ListEndpointsResponse = serde_json::from_value(serde_json::json!({
             "endpoints": [{
                 "id": "endpoint-1",
@@ -401,10 +437,12 @@ mod tests {
                 "gpu": {"pools": ["ADA_48"], "count": 1},
                 "timeout": 3600000,
                 "disk": 20
-            }]
+            }],
+            "pagination": {"nextCursor": null, "hasNextPage": false}
         }))
         .expect("endpoint fixture should parse");
         assert_eq!(endpoints.endpoints[0].workers.min, 0);
+        assert!(!endpoints.pagination.has_next_page);
     }
 
     #[test]
