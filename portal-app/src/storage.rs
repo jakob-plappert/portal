@@ -223,6 +223,15 @@ impl NexusStore {
         &self.database_path
     }
 
+    /// A tiny read proves that the database can be opened and queried without
+    /// changing user data. Setup preflight uses this instead of creating a
+    /// throwaway metadata row that could survive a crash.
+    pub fn health_check(&self) -> Result<(), String> {
+        self.connection()?
+            .query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(|error| format!("Could not query the Nexus database: {error}"))
+    }
+
     fn connection(&self) -> Result<Connection, String> {
         let connection = Connection::open(&self.database_path).map_err(|error| {
             format!(
@@ -1124,6 +1133,11 @@ mod tests {
         assert_eq!(loaded[0].gpu_profile.as_deref(), Some("NVIDIA L40S"));
         assert_eq!(loaded[0].advertised_hourly_rate_usd, Some(1.25));
         assert_eq!(loaded[0].execution_time_ms, Some(12_000));
+        let recoverable = reopened
+            .non_terminal_remote_jobs()
+            .expect("restart reconciliation query should work");
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].remote_job_id.as_deref(), Some("remote-123"));
     }
 
     #[test]

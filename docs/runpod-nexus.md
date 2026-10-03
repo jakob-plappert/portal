@@ -15,29 +15,71 @@ development.
 
 1. Enter a RunPod API key in Portal Settings. Portal stores it in the operating
    system keyring, never `settings.toml` or SQLite.
-2. Choose **Plan Nexus Infrastructure**. Nexus authenticates with a harmless
-   read, discovers existing endpoints and volumes, reads the live GPU/data
-   center catalogs, and reads recent billing history.
-3. Review the plan. It states whether each Portal-owned resource will be reused,
-   created, or updated; shows the selected GPU, VRAM, location, documented Pod
-   reference rates, the unavailable Serverless-rate status, and requested
-   volume size.
-4. Choose **Create Infrastructure** to explicitly confirm billable writes. No
-   create request is issued by discovery or planning.
+2. Choose **Run Preflight**. These checks are read-only and non-billable. Nexus
+   authenticates the key, checks required infrastructure reads, follows GHCR's
+   anonymous Bearer-token challenge to verify the exact public worker tag,
+   probes local database/media/temp storage, discovers existing endpoints and
+   volumes, reads the live GPU/data-center catalogs, and attempts to read recent
+   billing history. Missing billing visibility is a warning when all required
+   provisioning reads work.
+3. Choose **Plan Infrastructure** and review the separate Network Volume,
+   Serverless endpoint, and cost sections. The plan says whether each resource
+   will be reused, created, or updated and shows GPU, VRAM, location, worker
+   image, worker limits, reference Pod rates, the unavailable live Serverless
+   rate, and requested volume size.
+4. Choose **Create Infrastructure** to explicitly confirm billable writes.
+   Preflight and planning cannot issue create or update requests.
 5. Nexus creates or reuses `portal-nexus-models`, creates or updates
    `portal-nexus-flux2`, and verifies the endpoint through the provider API.
-   Successful IDs are stored in `infrastructure.toml` after each durable step.
-6. After the worker handler has registered, the first accepted job downloads
-   the required FLUX.2 files to the attached volume. Later workers validate and
-   reuse them.
-7. A TextToImage request is submitted through the queue API. Portal polls off
-   the Slint thread, ingests the returned PNG locally, inserts `MediaAsset`
-   metadata, and marks the job complete only after both file and database work
-   succeed.
+   Portal shows each stage and stores successful IDs in `infrastructure.toml`
+   after each durable step.
+6. Choose **Generate Test Image**, edit the prompt if desired, read the separate
+   compute-charge/model-bootstrap warning, and choose **Generate Test Image**
+   again to confirm. Infrastructure confirmation is not generation permission.
+7. Wait for the first model bootstrap. Portal reports truthful coarse states
+   because RunPod does not expose a reliable model-download percentage. The
+   first worker may download approximately 54 GB of FLUX.2 artifacts to the
+   attached volume; later workers validate and reuse them.
+8. Confirm the PNG appears in Nexus Media as a real image preview. Portal polls
+   off the Slint thread, saves the PNG under
+   `portaldata/apps/nexus/media/images`, inserts `MediaAsset` metadata in
+   SQLite, and marks the job complete only after both file and database work
+   succeed. Nexus is then ready for normal TextToImage generations.
 
 If volume creation succeeds but endpoint creation fails, Nexus keeps and records
 the volume. A retry rediscovers and reuses it; Portal does not aggressively
 delete a billable resource that may already contain data.
+
+This automated milestone does not claim a successful real end-to-end image.
+That is proven only after a human completes the confirmed test, the PNG exists
+locally, SQLite references it, and Nexus visibly renders it.
+
+## Common first-run failures
+
+- **Private or unavailable GHCR image:** Preflight checks
+  `ghcr.io/jakob-plappert/portal-comfy-worker:0.6.0` anonymously. A Bearer
+  challenge is normal; failure after the anonymous token exchange means the
+  package/tag visibility or registry availability must be fixed before
+  provisioning.
+- **Invalid RunPod key:** HTTP 401 appears under **RunPod API**. Save the correct
+  key in the OS keyring and rerun preflight.
+- **Insufficient permissions:** Portal reports whether endpoint, Network
+  Volume, GPU catalog, or data-center reads failed. Billing-only HTTP 403 is a
+  warning; missing provisioning reads are blocking failures.
+- **No compatible 48+ GB GPU:** Retry when Serverless capacity is available or
+  inspect RunPod regions. Nexus requires a compatible GPU in a data center with
+  STANDARD Network Volume support.
+- **Volume created but endpoint failed:** Keep the volume. Portal saved or can
+  rediscover its ID, and retry reuses it instead of creating a duplicate.
+- **Worker cold start:** A queued or `IN_PROGRESS` job may be waiting for a
+  worker/container. Portal intentionally shows no fake percentage.
+- **Model bootstrap failure:** Inspect the job error and copy the safe
+  diagnostic report. Confirm the Network Volume is attached, large enough, and
+  writable; then retry without deleting a successfully created volume.
+- **Local disk write failure:** Fix the reported Nexus media/temp path or disk
+  condition and rerun preflight. A provider-completed job whose PNG cannot be
+  ingested is stored locally as **Failed**, never **Completed** or permanently
+  **Downloading**.
 
 ## Two RunPod APIs
 
@@ -52,9 +94,10 @@ RunPod exposes two intentionally separate services:
 - `https://api.runpod.ai/v2/{endpoint_id}/...` is the Serverless queue surface.
   Portal uses `POST run`, `GET status/{job_id}`, and `POST cancel/{job_id}`.
 
-The current REST v2 schema exposes neither a supported current account-credit
-or balance field nor a documented live Serverless hourly rate. Nexus says this
-explicitly. Billing totals are labeled actual historical spend. GPU catalog
+The REST v2 responses Portal currently relies on expose neither a supported
+current account-credit/balance field nor a live Serverless rate Portal can use
+for a defensible estimate. Nexus says this explicitly. Billing totals are
+labeled actual historical spend. GPU catalog
 `secure` and `community` prices are labeled Pod reference rates and are never
 used as claimed Serverless costs. Portal cannot calculate a defensible
 per-image estimate until a real Serverless rate source is available.

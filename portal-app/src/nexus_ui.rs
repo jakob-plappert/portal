@@ -3,7 +3,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, VecModel};
 
 use crate::app_state::AppState;
 use crate::generation::{GenerationIntent, GenerationMode, GenerationParameters, MediaKind};
@@ -11,15 +11,17 @@ use crate::media_library::MediaLibrary;
 use crate::model_catalog::{FLUX_2_DEV_ID, find_model, validate_model_mode};
 use crate::prompt::PromptCompilerMode;
 use crate::provisioning::{
-    GpuPolicy, InfrastructureCommand, InfrastructureEvent, InfrastructureWorker, ProvisioningAction,
+    FLUX_WORKER_IMAGE, GpuPolicy, InfrastructureCommand, InfrastructureEvent, InfrastructureWorker,
+    ProvisioningAction,
 };
 use crate::runpod::{RunPodCommand, RunPodEvent, RunPodWorker};
 use crate::settings::{ApiKeySource, load_runpod_api_key, save_runpod_api_key};
+use crate::setup::{DiagnosticContext, SetupState, diagnostic_report};
 use crate::storage::{CharacterReferenceRole, JobStatus, MessageRole};
 use crate::worker_contract::{Dimensions, MediaWorkerRequest};
 use crate::{
-    CharacterListItem, ConversationListItem, JobListItem, MainWindow, MediaListItem,
-    MessageListItem,
+    CharacterListItem, ConversationListItem, DiagnosticListItem, JobListItem, MainWindow,
+    MediaListItem, MessageListItem,
 };
 
 pub fn setup(window: &MainWindow, state: Rc<RefCell<AppState>>) -> Result<(), String> {
@@ -37,33 +39,44 @@ fn setup_background_worker(window: &MainWindow, state: Rc<RefCell<AppState>>) {
     let weak_window = window.as_weak();
     let store = state.borrow().nexus_store.clone();
     let paths = state.borrow().paths.clone();
+    let ui_paths = paths.clone();
+    let setup_session = state.borrow().setup_session.clone();
     let worker = RunPodWorker::start(store.clone(), paths, move |event| {
         // Network work finishes on the worker thread. SQLite is updated there,
         // then `upgrade_in_event_loop` moves only a small owned closure back to
         // Slint's UI thread; Slint widgets are never touched from this thread.
-        let (job_id, status_text) = match event {
+        let (job_id, status_text, durable_status) = match event {
             RunPodEvent::Updated {
                 local_job_id,
-                status: _,
+                status,
                 message,
-            } => (local_job_id, message),
+            } => (local_job_id, message, status),
             RunPodEvent::Failed {
                 local_job_id,
                 error,
-            } => {
-                let _ =
-                    store.update_job(&local_job_id, JobStatus::Failed, None, None, Some(&error));
-                (local_job_id, error)
-            }
+            } => (local_job_id, error, JobStatus::Failed),
+        };
+        let (setup_label, setup_index) = if let Ok(mut setup) = setup_session.lock() {
+            setup.update_test_job(
+                &job_id,
+                durable_status.as_str(),
+                durable_status == JobStatus::Completed,
+            );
+            (setup.state.label().to_string(), setup.state.ui_index())
+        } else {
+            (String::from("Setup state unavailable"), -1)
         };
         let ui_store = store.clone();
+        let ui_paths = ui_paths.clone();
         let _ = weak_window.upgrade_in_event_loop(move |window| {
             window.set_nexus_status(status_text.into());
             window.set_compute_status(format!("Updated job {job_id}.").into());
+            window.set_setup_state_label(setup_label.into());
+            window.set_setup_stage(setup_index);
             if let Err(error) = refresh_jobs(&window, &ui_store) {
                 window.set_compute_status(error.into());
             }
-            if let Err(error) = refresh_media(&window, &ui_store) {
+            if let Err(error) = refresh_media(&window, &ui_store, &ui_paths) {
                 window.set_media_status(error.into());
             }
         });
@@ -108,15 +121,82 @@ fn setup_background_worker(window: &MainWindow, state: Rc<RefCell<AppState>>) {
 fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>) {
     let weak_window = window.as_weak();
     let state_store = state.borrow().provisioning_state_store.clone();
-    let worker = InfrastructureWorker::start(state_store, move |event| {
+    let paths = state.borrow().paths.clone();
+    let store = state.borrow().nexus_store.clone();
+    let setup_session = state.borrow().setup_session.clone();
+    let worker = InfrastructureWorker::start(state_store, paths, store, move |event| {
+        let (setup_label, setup_index) = if let Ok(mut setup) = setup_session.lock() {
+            match &event {
+                InfrastructureEvent::PreflightFinished {
+                    report,
+                    infrastructure_ready,
+                    ..
+                } => setup.finish_preflight(report.clone(), *infrastructure_ready),
+                InfrastructureEvent::PlanReady(_) => {
+                    let _ = setup.plan_ready();
+                    let _ = setup.await_infrastructure_confirmation();
+                }
+                InfrastructureEvent::Applied(_) => setup.infrastructure_ready(),
+                InfrastructureEvent::Failed(_) if setup.state == SetupState::Provisioning => {
+                    setup.state = SetupState::ApiKeyReady;
+                }
+                _ => {}
+            }
+            (setup.state.label().to_string(), setup.state.ui_index())
+        } else {
+            (String::from("Setup state unavailable"), -1)
+        };
         let _ = weak_window.upgrade_in_event_loop(move |window| match event {
-            InfrastructureEvent::Connected => {
-                window.set_runpod_status("Connected (validated through REST API v2)".into());
-                window.set_settings_status(
-                    "RunPod key is valid and has infrastructure read access.".into(),
-                );
+            InfrastructureEvent::PreflightFinished {
+                report,
+                infrastructure_ready,
+                ready_volume,
+                ready_endpoint,
+            } => {
+                window.set_setup_state_label(setup_label.into());
+                window.set_setup_stage(setup_index);
+                set_diagnostic_model(&window, &report.checks);
+                set_preflight_summary(&window, &report.checks);
+                if report.has_failures() {
+                    window.set_settings_status(
+                        "Preflight found blocking failures. No billable action occurred.".into(),
+                    );
+                } else if infrastructure_ready {
+                    window.set_settings_status(
+                        "Preflight passed and existing managed infrastructure was rediscovered."
+                            .into(),
+                    );
+                    window.set_compute_status(
+                        "Infrastructure Ready. You may run an explicitly confirmed test generation."
+                            .into(),
+                    );
+                } else {
+                    window.set_settings_status(
+                        "Preflight passed. Review an infrastructure plan before creation.".into(),
+                    );
+                }
+                if let Some(volume) = ready_volume {
+                    window.set_volume_resource(
+                        format!(
+                            "{} · {} GB · {} · ID {}",
+                            volume.name, volume.size, volume.data_center, volume.id
+                        )
+                        .into(),
+                    );
+                }
+                if let Some(endpoint) = ready_endpoint {
+                    window.set_endpoint_resource(
+                        format!(
+                            "{} · verified · min {} / max {} · ID {}",
+                            endpoint.name, endpoint.workers.min, endpoint.workers.max, endpoint.id
+                        )
+                        .into(),
+                    );
+                }
             }
             InfrastructureEvent::PlanReady(plan) => {
+                window.set_setup_state_label(setup_label.into());
+                window.set_setup_stage(setup_index);
                 window.set_infrastructure_plan_visible(true);
                 window.set_infrastructure_plan_summary(plan_summary(&plan).into());
                 window.set_compute_status(
@@ -125,7 +205,18 @@ fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>
                 );
                 window.set_cost_status(cost_summary(&plan).into());
             }
+            InfrastructureEvent::Progress(message) => {
+                let previous = window.get_apply_progress().to_string();
+                let progress = if previous.is_empty() {
+                    message
+                } else {
+                    format!("{previous}\n{message}")
+                };
+                window.set_apply_progress(progress.into());
+            }
             InfrastructureEvent::Applied(result) => {
+                window.set_setup_state_label(setup_label.into());
+                window.set_setup_stage(setup_index);
                 window.set_infrastructure_plan_visible(false);
                 window.set_compute_status(result.messages.join(" ").into());
                 window.set_volume_resource(
@@ -148,35 +239,35 @@ fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>
                     )
                     .into(),
                 );
-                window.set_image_endpoint_id(result.image_endpoint.id.into());
             }
             InfrastructureEvent::Failed(error) => {
+                window.set_setup_state_label(setup_label.into());
+                window.set_setup_stage(setup_index);
+                let previous = window.get_apply_progress().to_string();
+                if !previous.is_empty() {
+                    window.set_apply_progress(format!("{previous}\n✗ {error}").into());
+                }
                 window.set_compute_status(error.clone().into());
                 window.set_settings_status(error.into());
             }
         });
     });
-    state.borrow_mut().infrastructure_worker = Some(worker);
+    state.borrow_mut().infrastructure_worker = Some(worker.clone());
 
     let weak = window.as_weak();
     let callback_state = Rc::clone(&state);
-    window.on_check_runpod(move || {
-        let result = (|| {
-            let state = callback_state.borrow();
-            let api_key = state
-                .api_key
-                .value
-                .clone()
-                .ok_or_else(|| String::from("Save a RunPod API key first."))?;
-            state
-                .infrastructure_worker
-                .as_ref()
-                .ok_or_else(|| String::from("Infrastructure worker is unavailable."))?
-                .send(InfrastructureCommand::Validate { api_key })
-        })();
+    window.on_run_preflight(move || {
+        let result = start_preflight(&callback_state);
         if let Some(window) = weak.upgrade() {
             match result {
-                Ok(()) => window.set_settings_status("Checking RunPod access…".into()),
+                Ok(()) => {
+                    window.set_setup_state_label("Preflight running".into());
+                    window.set_setup_stage(SetupState::PreflightRunning.ui_index());
+                    window.set_settings_status(
+                        "Running read-only API, permission, GHCR, storage, and discovery checks…"
+                            .into(),
+                    );
+                }
                 Err(error) => window.set_settings_status(error.into()),
             }
         }
@@ -191,17 +282,11 @@ fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>
             .map_err(|_| String::from("Volume size must be a whole number of GB."));
         let result = size.and_then(|volume_size_gb| {
             let state = callback_state.borrow();
-            let api_key = state
-                .api_key
-                .value
-                .clone()
-                .ok_or_else(|| String::from("Save a RunPod API key first."))?;
             state
                 .infrastructure_worker
                 .as_ref()
                 .ok_or_else(|| String::from("Infrastructure worker is unavailable."))?
-                .send(InfrastructureCommand::DiscoverAndPlan {
-                    api_key,
+                .send(InfrastructureCommand::PlanInfrastructure {
                     policy: GpuPolicy::Balanced,
                     volume_size_gb,
                 })
@@ -211,7 +296,7 @@ fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>
                 Ok(()) => {
                     window.set_infrastructure_plan_visible(false);
                     window.set_compute_status(
-                        "Inspecting RunPod resources, live GPU catalog, and billing…".into(),
+                        "Building a plan from the successful preflight discovery…".into(),
                     );
                 }
                 Err(error) => window.set_compute_status(error.into()),
@@ -220,14 +305,20 @@ fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>
     });
 
     let weak = window.as_weak();
+    let callback_state = Rc::clone(&state);
     window.on_apply_infrastructure(move || {
         let result = (|| {
-            let state = state.borrow();
+            let state = callback_state.borrow();
             let api_key = state
                 .api_key
                 .value
                 .clone()
                 .ok_or_else(|| String::from("RunPod API key is not configured."))?;
+            state
+                .setup_session
+                .lock()
+                .map_err(|_| String::from("Setup state is unavailable."))?
+                .confirm_infrastructure()?;
             state
                 .infrastructure_worker
                 .as_ref()
@@ -236,14 +327,231 @@ fn setup_infrastructure_worker(window: &MainWindow, state: Rc<RefCell<AppState>>
         })();
         if let Some(window) = weak.upgrade() {
             match result {
-                Ok(()) => window.set_compute_status(
-                    "Applying the confirmed plan. Successful resources will be retained for safe retry."
-                        .into(),
-                ),
+                Ok(()) => {
+                    window.set_setup_state_label("Provisioning infrastructure".into());
+                    window.set_setup_stage(SetupState::Provisioning.ui_index());
+                    window.set_apply_progress(String::new().into());
+                    window.set_compute_status(
+                        "Applying the confirmed plan. Successful resources will be retained for safe retry."
+                            .into(),
+                    );
+                }
+                Err(error) => {
+                    if let Ok(mut setup) = callback_state.borrow().setup_session.lock()
+                        && setup.state == SetupState::Provisioning
+                    {
+                        setup.state = SetupState::AwaitingInfrastructureConfirmation;
+                        window.set_setup_state_label(setup.state.label().into());
+                        window.set_setup_stage(setup.state.ui_index());
+                    }
+                    window.set_compute_status(error.into());
+                }
+            }
+        }
+    });
+
+    setup_test_generation_callbacks(window, Rc::clone(&state));
+    setup_diagnostic_callbacks(window, Rc::clone(&state));
+
+    // With a stored key, startup automatically performs only read-only checks.
+    // This is how valid managed infrastructure is rediscovered after restart;
+    // no create/update request can occur without the later confirmation click.
+    if state.borrow().api_key.value.is_some() && start_preflight(&state).is_ok() {
+        window.set_setup_state_label("Preflight running".into());
+        window.set_setup_stage(SetupState::PreflightRunning.ui_index());
+        window.set_settings_status("Rediscovering existing RunPod infrastructure…".into());
+    }
+}
+
+fn start_preflight(state: &Rc<RefCell<AppState>>) -> Result<(), String> {
+    let borrowed = state.borrow();
+    let api_key = borrowed
+        .api_key
+        .value
+        .clone()
+        .ok_or_else(|| String::from("Save a RunPod API key first."))?;
+    borrowed
+        .setup_session
+        .lock()
+        .map_err(|_| String::from("Setup state is unavailable."))?
+        .begin_preflight()?;
+    borrowed
+        .infrastructure_worker
+        .as_ref()
+        .ok_or_else(|| String::from("Infrastructure worker is unavailable."))?
+        .send(InfrastructureCommand::RunPreflight { api_key })
+}
+
+fn setup_test_generation_callbacks(window: &MainWindow, state: Rc<RefCell<AppState>>) {
+    let weak = window.as_weak();
+    let callback_state = Rc::clone(&state);
+    window.on_request_test_generation(move || {
+        let result = callback_state
+            .borrow()
+            .setup_session
+            .lock()
+            .map_err(|_| String::from("Setup state is unavailable."))
+            .and_then(|mut setup| setup.request_test_generation());
+        if let Some(window) = weak.upgrade() {
+            match result {
+                Ok(()) => {
+                    window.set_setup_state_label("Awaiting test generation confirmation".into());
+                    window
+                        .set_setup_stage(SetupState::AwaitingTestGenerationConfirmation.ui_index());
+                    window.set_test_generation_dialog_open(true);
+                }
                 Err(error) => window.set_compute_status(error.into()),
             }
         }
     });
+
+    let weak = window.as_weak();
+    let callback_state = Rc::clone(&state);
+    window.on_cancel_test_generation(move || {
+        if let Ok(mut setup) = callback_state.borrow().setup_session.lock() {
+            setup.cancel_test_generation();
+            if let Some(window) = weak.upgrade() {
+                window.set_setup_state_label(setup.state.label().into());
+                window.set_setup_stage(setup.state.ui_index());
+            }
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_confirm_test_generation(move |prompt| {
+        let result = (|| {
+            {
+                let borrowed = state.borrow();
+                borrowed
+                    .setup_session
+                    .lock()
+                    .map_err(|_| String::from("Setup state is unavailable."))?
+                    .confirm_test_generation()?;
+            }
+            // This is the normal production intent/request/job path. The only
+            // test-specific behavior is the preceding human confirmation.
+            let job_id = prepare_submission(
+                &state,
+                "text_to_image",
+                FLUX_2_DEV_ID,
+                &prompt,
+                "",
+                "",
+                "1024x1024",
+                "",
+            )?;
+            state
+                .borrow()
+                .setup_session
+                .lock()
+                .map_err(|_| String::from("Setup state is unavailable."))?
+                .track_test_job(job_id.clone());
+            Ok::<String, String>(job_id)
+        })();
+        if let Some(window) = weak.upgrade() {
+            match result {
+                Ok(job_id) => {
+                    window.set_setup_state_label("Test generation running".into());
+                    window.set_setup_stage(SetupState::TestGenerationRunning.ui_index());
+                    window.set_nexus_status(format!("Submitting test job {job_id} to RunPod…").into());
+                    window.set_compute_status(
+                        "Submitting to RunPod. First FLUX.2 startup may take significantly longer while model files are downloaded to the Network Volume."
+                            .into(),
+                    );
+                }
+                Err(error) => {
+                    if let Ok(mut setup) = state.borrow().setup_session.lock() {
+                        setup.state = SetupState::InfrastructureReady;
+                        setup.last_generation_state = Some(String::from("failed"));
+                        window.set_setup_state_label(setup.state.label().into());
+                        window.set_setup_stage(setup.state.ui_index());
+                    }
+                    window.set_compute_status(error.into());
+                }
+            }
+        }
+    });
+}
+
+fn setup_diagnostic_callbacks(window: &MainWindow, state: Rc<RefCell<AppState>>) {
+    let weak = window.as_weak();
+    let callback_state = Rc::clone(&state);
+    window.on_copy_diagnostic_report(move || {
+        let result = (|| {
+            let borrowed = callback_state.borrow();
+            let setup = borrowed
+                .setup_session
+                .lock()
+                .map_err(|_| String::from("Setup state is unavailable."))?
+                .clone();
+            let provisioning = borrowed.provisioning_state_store.load()?;
+            let jobs = borrowed.nexus_store.list_jobs()?;
+            let last_job = jobs.first();
+            let api_key = borrowed.api_key.value.clone();
+            let media_root = borrowed.paths.media_dir();
+            drop(borrowed);
+            let report = diagnostic_report(DiagnosticContext {
+                setup: &setup,
+                provisioning: &provisioning,
+                local_media_root: &media_root,
+                last_job_id: last_job.map(|job| job.id.as_str()),
+                last_job_status: last_job.map(|job| job.status.as_str()),
+                api_key: api_key.as_deref(),
+            });
+            let mut clipboard = arboard::Clipboard::new()
+                .map_err(|error| format!("Could not access the system clipboard: {error}"))?;
+            clipboard
+                .set_text(report)
+                .map_err(|error| format!("Could not copy the diagnostic report: {error}"))
+        })();
+        if let Some(window) = weak.upgrade() {
+            window.set_settings_status(
+                result
+                    .map(|()| String::from("Safe diagnostic report copied to the clipboard."))
+                    .unwrap_or_else(|error| error)
+                    .into(),
+            );
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_open_data_folder(move || {
+        let result = crate::platform::open_folder(&state.borrow().paths.nexus_dir());
+        if let Some(window) = weak.upgrade() {
+            window.set_settings_status(
+                result
+                    .map(|()| String::from("Opened the Nexus data folder."))
+                    .unwrap_or_else(|error| error)
+                    .into(),
+            );
+        }
+    });
+}
+
+fn set_diagnostic_model(window: &MainWindow, checks: &[crate::setup::PreflightCheck]) {
+    let items = checks
+        .iter()
+        .map(|check| DiagnosticListItem {
+            status: check.status.label().into(),
+            name: check.name.clone().into(),
+            summary: check.summary.clone().into(),
+            detail: check.detail.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    window.set_setup_diagnostics(ModelRc::new(VecModel::from(items)));
+}
+
+fn set_preflight_summary(window: &MainWindow, checks: &[crate::setup::PreflightCheck]) {
+    let status_for = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check.name == name)
+            .map(|check| format!("{} · {}", check.status.label(), check.summary))
+            .unwrap_or_else(|| String::from("Not checked"))
+    };
+    window.set_runpod_status(status_for("RunPod API").into());
+    window.set_worker_image_status(status_for("GHCR worker image").into());
+    window.set_local_storage_status(status_for("Local Nexus storage").into());
 }
 
 fn setup_conversation_callbacks(window: &MainWindow, state: Rc<RefCell<AppState>>) {
@@ -429,7 +737,7 @@ fn setup_media_callbacks(window: &MainWindow, state: Rc<RefCell<AppState>>) {
                         )
                         .into(),
                     );
-                    let _ = refresh_media(&window, &state.nexus_store);
+                    let _ = refresh_media(&window, &state.nexus_store, &state.paths);
                 }
                 Err(error) => window.set_media_status(error.into()),
             }
@@ -437,12 +745,13 @@ fn setup_media_callbacks(window: &MainWindow, state: Rc<RefCell<AppState>>) {
     });
 
     let weak = window.as_weak();
+    let callback_state = Rc::clone(&state);
     window.on_select_reference_media(move |id| {
         let id = id.to_string();
-        let store = state.borrow().nexus_store.clone();
+        let store = callback_state.borrow().nexus_store.clone();
         match store.media_asset(&id) {
             Ok(Some(asset)) => {
-                state.borrow_mut().selected_reference_media_id = Some(id.clone());
+                callback_state.borrow_mut().selected_reference_media_id = Some(id.clone());
                 if let Some(window) = weak.upgrade() {
                     window.set_selected_reference_id(id.into());
                     window.set_selected_reference_label(
@@ -453,6 +762,23 @@ fn setup_media_callbacks(window: &MainWindow, state: Rc<RefCell<AppState>>) {
             }
             Ok(None) => set_media_status(&weak, "Media asset was not found."),
             Err(error) => set_media_status(&weak, &error),
+        }
+    });
+
+    let weak = window.as_weak();
+    window.on_select_media_preview(move |id| {
+        let borrowed = state.borrow();
+        let result = borrowed.nexus_store.media_asset(&id).and_then(|asset| {
+            asset
+                .ok_or_else(|| String::from("Media asset was not found."))
+                .and_then(|asset| borrowed.paths.absolute_media_path(&asset.relative_path))
+        });
+        if let Some(window) = weak.upgrade() {
+            match result {
+                Ok(path) => window
+                    .set_media_status(format!("Previewing local file {}.", path.display()).into()),
+                Err(error) => window.set_media_status(error.into()),
+            }
         }
     });
 }
@@ -559,14 +885,7 @@ fn prepare_submission(
         ));
     }
     let provisioned = borrowed.provisioning_state_store.load()?;
-    let endpoint_id = match mode.output_kind() {
-        MediaKind::Image => provisioned
-            .image_endpoint_id
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| borrowed.settings.runpod.image_endpoint_id.clone()),
-        MediaKind::Video => borrowed.settings.runpod.video_endpoint_id.clone(),
-        MediaKind::Audio => unreachable!("generation modes do not directly output audio"),
-    };
+    let endpoint_id = generation_endpoint_id(mode.output_kind(), &provisioned, &borrowed.settings);
     if endpoint_id.trim().is_empty() {
         return Err(format!(
             "RunPod {} endpoint is not configured.",
@@ -642,6 +961,24 @@ fn prepare_submission(
     Ok(job.id)
 }
 
+fn generation_endpoint_id(
+    output_kind: MediaKind,
+    provisioned: &crate::provisioning::ProvisioningState,
+    settings: &crate::settings::PortalSettings,
+) -> String {
+    match output_kind {
+        // The managed endpoint is authoritative. A manual image ID is only a
+        // fallback for advanced users who have not provisioned through Nexus.
+        MediaKind::Image => provisioned
+            .image_endpoint_id
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| settings.runpod.image_endpoint_id.clone()),
+        MediaKind::Video => settings.runpod.video_endpoint_id.clone(),
+        MediaKind::Audio => unreachable!("generation modes do not directly output audio"),
+    }
+}
+
 fn setup_settings_callback(window: &MainWindow, state: Rc<RefCell<AppState>>) {
     let weak = window.as_weak();
     window.on_save_settings(
@@ -664,6 +1001,11 @@ fn setup_settings_callback(window: &MainWindow, state: Rc<RefCell<AppState>>) {
                 state.settings.prompt_compiler.local_http_url = local_url.trim().to_string();
                 state.settings_store.save(&state.settings)?;
                 state.api_key = load_runpod_api_key();
+                if state.api_key.value.is_some()
+                    && let Ok(mut setup) = state.setup_session.lock()
+                {
+                    setup.api_key_saved();
+                }
                 // Provisioning finishes on a background thread and persists
                 // its non-secret result. Reloading here refreshes the UI-side
                 // snapshot without ever sending `Rc<RefCell<_>>` across
@@ -689,7 +1031,7 @@ fn setup_settings_callback(window: &MainWindow, state: Rc<RefCell<AppState>>) {
 fn refresh_all(window: &MainWindow, state: &AppState) -> Result<(), String> {
     refresh_conversations(window, &state.nexus_store)?;
     refresh_characters(window, &state.nexus_store)?;
-    refresh_media(window, &state.nexus_store)?;
+    refresh_media(window, &state.nexus_store, &state.paths)?;
     refresh_jobs(window, &state.nexus_store)?;
     refresh_settings(window, state);
     Ok(())
@@ -759,22 +1101,54 @@ fn refresh_characters(
     Ok(())
 }
 
-fn refresh_media(window: &MainWindow, store: &crate::storage::NexusStore) -> Result<(), String> {
-    let items = store
-        .list_media_assets()?
-        .into_iter()
-        .map(|asset| MediaListItem {
+fn refresh_media(
+    window: &MainWindow,
+    store: &crate::storage::NexusStore,
+    paths: &crate::paths::PortalPaths,
+) -> Result<(), String> {
+    let jobs = store.list_jobs()?;
+    let mut items = Vec::new();
+    for asset in store.list_media_assets()? {
+        let absolute_path = paths.absolute_media_path(&asset.relative_path)?;
+        let preview = if asset.kind == MediaKind::Image {
+            Image::load_from_path(&absolute_path).unwrap_or_default()
+        } else {
+            Image::default()
+        };
+        let job = asset
+            .generation_job_id
+            .as_deref()
+            .and_then(|job_id| jobs.iter().find(|candidate| candidate.id == job_id));
+        let job_status = job
+            .map(|job| format!("Generation job: {}", job.status.as_str()))
+            .unwrap_or_else(|| String::from("Local import"));
+        let prompt_summary = job
+            .map(|job| summarize_prompt(&job.user_idea))
+            .unwrap_or_default();
+        items.push(MediaListItem {
             id: asset.id.into(),
             kind: asset.kind.to_string().into(),
-            path: asset.relative_path.display().to_string().into(),
+            path: absolute_path.display().to_string().into(),
             details: asset
                 .model_id
                 .unwrap_or_else(|| format!("{:?}", asset.source))
                 .into(),
-        })
-        .collect::<Vec<_>>();
+            preview,
+            job_status: job_status.into(),
+            prompt_summary: prompt_summary.into(),
+        });
+    }
     window.set_media_assets(ModelRc::new(VecModel::from(items)));
     Ok(())
+}
+
+fn summarize_prompt(prompt: &str) -> String {
+    const MAX_CHARS: usize = 140;
+    let trimmed = prompt.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed.to_string();
+    }
+    format!("{}…", trimmed.chars().take(MAX_CHARS).collect::<String>())
 }
 
 fn refresh_jobs(window: &MainWindow, store: &crate::storage::NexusStore) -> Result<(), String> {
@@ -829,6 +1203,12 @@ fn refresh_settings(window: &MainWindow, state: &AppState) {
         ApiKeySource::Missing => "Not configured",
     };
     window.set_runpod_status(status.into());
+    window.set_worker_image(FLUX_WORKER_IMAGE.into());
+    if let Ok(setup) = state.setup_session.lock() {
+        window.set_setup_state_label(setup.state.label().into());
+        window.set_setup_stage(setup.state.ui_index());
+        set_diagnostic_model(window, &setup.diagnostics);
+    }
     window.set_volume_resource(
         match (
             state.provisioning_state.network_volume_name.as_deref(),
@@ -901,33 +1281,43 @@ fn optional_text(value: &str) -> Option<String> {
 }
 
 fn plan_summary(plan: &crate::provisioning::ProvisioningPlan) -> String {
-    let actions = plan
+    let network_volume = plan
         .actions
         .iter()
-        .map(|action| match action {
+        .find_map(|action| match action {
             ProvisioningAction::ReuseNetworkVolume {
                 name,
                 size_gb,
                 data_center_id,
                 ..
-            } => format!("Reuse Network Volume {name} ({size_gb} GB in {data_center_id})"),
-            ProvisioningAction::CreateNetworkVolume(request) => format!(
-                "Create Network Volume {} ({} GB STANDARD in {})",
+            } => Some(format!(
+                "Action: Reuse\nName: {name}\nSize: {size_gb} GB\nData center: {data_center_id}"
+            )),
+            ProvisioningAction::CreateNetworkVolume(request) => Some(format!(
+                "Action: Create\nName: {}\nSize: {} GB\nData center: {}",
                 request.name, request.size, request.data_center
-            ),
-            ProvisioningAction::ReuseImageEndpoint { name, .. } => {
-                format!("Reuse image endpoint {name}")
-            }
-            ProvisioningAction::CreateImageEndpoint => {
-                String::from("Create FLUX.2 image endpoint (min 0 / max 1)")
-            }
-            ProvisioningAction::UpdateImageEndpoint { id } => {
-                format!("Update existing image endpoint {id}")
-            }
-            ProvisioningAction::VerifyEndpoint => String::from("Verify endpoint"),
+            )),
+            _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .unwrap_or_else(|| String::from("No Network Volume action"));
+    let endpoint = plan
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ProvisioningAction::ReuseImageEndpoint { name, .. } => {
+                Some(format!("Action: Reuse\nName: {name}"))
+            }
+            ProvisioningAction::CreateImageEndpoint => Some(format!(
+                "Action: Create\nName: {}",
+                crate::provisioning::NEXUS_IMAGE_ENDPOINT_NAME
+            )),
+            ProvisioningAction::UpdateImageEndpoint { id } => Some(format!(
+                "Action: Update\nName: {}\nExisting ID: {id}",
+                crate::provisioning::NEXUS_IMAGE_ENDPOINT_NAME
+            )),
+            _ => None,
+        })
+        .unwrap_or_else(|| String::from("No endpoint action"));
     let serverless_rate = plan
         .selected_gpu
         .serverless_usd_per_hour
@@ -936,11 +1326,12 @@ fn plan_summary(plan: &crate::provisioning::ProvisioningPlan) -> String {
             String::from("Serverless rate is not exposed by the current RunPod REST API v2.")
         });
     format!(
-        "{actions}\n\nGPU: {} · {} GB VRAM · {}\nLocation: {}\n{}\nSecure Pod reference rate: ${:.4}/hour\nCommunity Pod reference rate: ${:.4}/hour\nPod rates are catalog references used only for GPU ranking; they are not Serverless prices.\n\n{}",
+        "NETWORK VOLUME\n{network_volume}\n\nSERVERLESS ENDPOINT\n{endpoint}\nGPU: {}\nVRAM: {} GB\nAvailability: {}\nData center: {}\nWorkers: min 0 / max 1\nWorker image: {}\n\nCOST INFORMATION\n{}\nSecure Pod reference rate: ${:.4}/hour\nCommunity Pod reference rate: ${:.4}/hour\nPod rates are reference only; they are not Serverless prices.\nPersistent volume: billable while it exists.\n\n{}",
         plan.selected_gpu.display_name,
         plan.selected_gpu.memory_gb,
         plan.selected_gpu.availability,
         plan.selected_gpu.data_center_id,
+        FLUX_WORKER_IMAGE,
         serverless_rate,
         plan.selected_gpu.secure_pod_reference_usd_per_hour,
         plan.selected_gpu.community_pod_reference_usd_per_hour,
@@ -982,7 +1373,7 @@ fn set_media_status(weak: &slint::Weak<MainWindow>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provisioning::{ProvisioningPlan, SelectedGpu};
+    use crate::provisioning::{ProvisioningPlan, ProvisioningState, SelectedGpu};
 
     #[test]
     fn plan_ui_does_not_present_pod_pricing_as_a_serverless_rate() {
@@ -1009,5 +1400,23 @@ mod tests {
         assert!(summary.contains("Secure Pod reference rate: $0.8000/hour"));
         assert!(summary.contains("not Serverless prices"));
         assert!(!summary.contains("Serverless rate: $0.0000"));
+    }
+
+    #[test]
+    fn managed_image_endpoint_overrides_manual_fallback() {
+        let provisioned = ProvisioningState {
+            image_endpoint_id: Some(String::from("managed-flux")),
+            ..ProvisioningState::default()
+        };
+        let mut settings = crate::settings::PortalSettings::default();
+        settings.runpod.image_endpoint_id = String::from("manual-fallback");
+        assert_eq!(
+            generation_endpoint_id(MediaKind::Image, &provisioned, &settings),
+            "managed-flux"
+        );
+        assert_eq!(
+            generation_endpoint_id(MediaKind::Image, &ProvisioningState::default(), &settings,),
+            "manual-fallback"
+        );
     }
 }

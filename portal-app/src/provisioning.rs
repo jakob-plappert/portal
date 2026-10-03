@@ -12,6 +12,8 @@ use crate::runpod_infrastructure::{
     EndpointGpu, EndpointScaling, EndpointWorkers, GpuType, NetworkVolume,
     RunPodInfrastructureClient, UpdateEndpointRequest,
 };
+use crate::setup::{PreflightReport, run_preflight};
+use crate::{paths::PortalPaths, storage::NexusStore};
 
 pub const NEXUS_VOLUME_NAME: &str = "portal-nexus-models";
 pub const NEXUS_IMAGE_ENDPOINT_NAME: &str = "portal-nexus-flux2";
@@ -151,20 +153,6 @@ impl ProvisioningStateStore {
     }
 }
 
-pub fn discover(client: &RunPodInfrastructureClient) -> Result<ProvisioningDiscovery, String> {
-    // These reads are deliberately sequential. The infrastructure worker owns
-    // this entire operation off the UI thread, and avoiding nested threads
-    // keeps both failure ordering and rate-limit behavior easy to understand.
-    client.validate_api_key()?;
-    Ok(ProvisioningDiscovery {
-        endpoints: client.list_endpoints()?,
-        volumes: client.list_network_volumes()?,
-        gpus: client.list_gpus()?,
-        data_centers: client.list_data_centers()?,
-        recent_billing: client.recent_billing()?,
-    })
-}
-
 pub fn build_plan(
     discovery: &ProvisioningDiscovery,
     remembered: &ProvisioningState,
@@ -270,15 +258,16 @@ pub fn build_plan(
         volume_size_gb,
         actual_recent_spend_usd: discovery.recent_billing.total_usd,
         cost_note: String::from(
-            "Serverless rate is not exposed by the current RunPod REST API v2, so future Serverless compute cost cannot yet be estimated. Idle compute is $0 with min workers 0; persistent Network Volume storage is still billable.",
+            "Serverless live rate is unavailable through the current REST v2 response used by Portal, so future compute cost is not estimated. Min workers 0 avoids continuously running workers, but does not make the setup free: jobs incur compute charges and the persistent Network Volume is billable while it exists.",
         ),
     })
 }
 
-pub fn apply_plan(
+fn apply_plan_with_progress(
     client: &RunPodInfrastructureClient,
     state_store: &ProvisioningStateStore,
     plan: &ProvisioningPlan,
+    mut on_progress: impl FnMut(String),
 ) -> Result<ProvisioningResult, String> {
     let mut remembered = state_store.load()?;
     let mut volume: Option<NetworkVolume> = None;
@@ -288,11 +277,25 @@ pub fn apply_plan(
     for action in &plan.actions {
         match action {
             ProvisioningAction::ReuseNetworkVolume { id, .. } => {
-                volume = Some(client.get_network_volume(id)?);
+                on_progress(String::from("• Creating/reusing Network Volume"));
+                let reused = client.get_network_volume(id)?;
+                on_progress(String::from("✓ Network Volume reused"));
+                on_progress(String::from("• Saving Network Volume identity"));
+                remembered.network_volume_id = Some(reused.id.clone());
+                remembered.network_volume_name = Some(reused.name.clone());
+                remembered.network_volume_size_gb = Some(reused.size);
+                remembered.data_center_id = Some(reused.data_center.clone());
+                remembered.schema_version = 1;
+                state_store.save(&remembered)?;
+                on_progress(String::from("✓ Network Volume identity saved"));
+                volume = Some(reused);
                 messages.push(String::from("Reused existing Network Volume."));
             }
             ProvisioningAction::CreateNetworkVolume(request) => {
+                on_progress(String::from("• Creating/reusing Network Volume"));
                 let created = client.create_network_volume(request)?;
+                on_progress(String::from("✓ Network Volume created"));
+                on_progress(String::from("• Saving Network Volume identity"));
                 // Save immediately. If endpoint creation fails, retrying later
                 // reuses this billable resource instead of creating another.
                 remembered.network_volume_id = Some(created.id.clone());
@@ -305,14 +308,25 @@ pub fn apply_plan(
                         "Network Volume was created, but Nexus could not save its local ID. Refresh will rediscover it by name; do not create another volume manually. {error}"
                     )
                 })?;
+                on_progress(String::from("✓ Network Volume identity saved"));
                 volume = Some(created);
                 messages.push(String::from("Created Network Volume."));
             }
             ProvisioningAction::ReuseImageEndpoint { id, .. } => {
-                endpoint = Some(client.get_endpoint(id)?);
+                on_progress(String::from("• Creating/updating Serverless endpoint"));
+                let reused = client.get_endpoint(id)?;
+                on_progress(String::from("✓ Serverless endpoint reused"));
+                on_progress(String::from("• Saving endpoint identity"));
+                remembered.image_endpoint_id = Some(reused.id.clone());
+                remembered.image_endpoint_name = Some(reused.name.clone());
+                remembered.schema_version = 1;
+                state_store.save(&remembered)?;
+                on_progress(String::from("✓ Endpoint identity saved"));
+                endpoint = Some(reused);
                 messages.push(String::from("Reused existing FLUX.2 endpoint."));
             }
             ProvisioningAction::CreateImageEndpoint => {
+                on_progress(String::from("• Creating/updating Serverless endpoint"));
                 let volume_id = volume
                     .as_ref()
                     .map(|volume| volume.id.as_str())
@@ -322,6 +336,8 @@ pub fn apply_plan(
                 let created = client
                     .create_endpoint(&endpoint_create_request(&plan.selected_gpu, volume_id))
                     .map_err(|error| endpoint_failure_message(&messages, error))?;
+                on_progress(String::from("✓ Serverless endpoint created"));
+                on_progress(String::from("• Saving endpoint identity"));
                 // Persist the endpoint before verification for the same
                 // partial-success reason as the volume above. A retry can
                 // verify or update it instead of creating a duplicate.
@@ -333,10 +349,12 @@ pub fn apply_plan(
                         "The FLUX.2 endpoint was created, but Nexus could not save its local ID. Refresh will rediscover it by name. {error}"
                     )
                 })?;
+                on_progress(String::from("✓ Endpoint identity saved"));
                 endpoint = Some(created);
                 messages.push(String::from("Created FLUX.2 Serverless endpoint."));
             }
             ProvisioningAction::UpdateImageEndpoint { id } => {
+                on_progress(String::from("• Creating/updating Serverless endpoint"));
                 let volume_id = volume
                     .as_ref()
                     .map(|volume| volume.id.as_str())
@@ -346,6 +364,8 @@ pub fn apply_plan(
                 let updated = client
                     .update_endpoint(id, &endpoint_update_request(&plan.selected_gpu, volume_id))
                     .map_err(|error| endpoint_failure_message(&messages, error))?;
+                on_progress(String::from("✓ Serverless endpoint updated"));
+                on_progress(String::from("• Saving endpoint identity"));
                 remembered.image_endpoint_id = Some(updated.id.clone());
                 remembered.image_endpoint_name = Some(updated.name.clone());
                 remembered.schema_version = 1;
@@ -354,10 +374,12 @@ pub fn apply_plan(
                         "The FLUX.2 endpoint was updated, but Nexus could not save its local ID. Refresh will rediscover it by name. {error}"
                     )
                 })?;
+                on_progress(String::from("✓ Endpoint identity saved"));
                 endpoint = Some(updated);
                 messages.push(String::from("Updated existing FLUX.2 endpoint."));
             }
             ProvisioningAction::VerifyEndpoint => {
+                on_progress(String::from("• Verifying endpoint configuration"));
                 let id = endpoint
                     .as_ref()
                     .map(|endpoint| endpoint.id.as_str())
@@ -368,6 +390,7 @@ pub fn apply_plan(
                 messages.push(String::from(
                     "Verified endpoint through RunPod REST API v2.",
                 ));
+                on_progress(String::from("✓ Endpoint configuration verified"));
             }
         }
     }
@@ -387,6 +410,7 @@ pub fn apply_plan(
     remembered.serverless_usd_per_hour = plan.selected_gpu.serverless_usd_per_hour;
     remembered.last_verified_unix = Some(now_unix()?);
     state_store.save(&remembered)?;
+    on_progress(String::from("✓ Finished"));
 
     Ok(ProvisioningResult {
         network_volume: volume,
@@ -568,14 +592,64 @@ fn now_unix() -> Result<u64, String> {
         .map_err(|error| format!("System clock is before the Unix epoch: {error}"))
 }
 
+fn reusable_resources<'a>(
+    plan: &ProvisioningPlan,
+    discovery: &'a ProvisioningDiscovery,
+) -> Option<(&'a NetworkVolume, &'a Endpoint)> {
+    let (volume_id, endpoint_id) = match plan.actions.as_slice() {
+        [
+            ProvisioningAction::ReuseNetworkVolume { id: volume_id, .. },
+            ProvisioningAction::ReuseImageEndpoint {
+                id: endpoint_id, ..
+            },
+            ProvisioningAction::VerifyEndpoint,
+        ] => (volume_id, endpoint_id),
+        _ => return None,
+    };
+    Some((
+        discovery
+            .volumes
+            .iter()
+            .find(|volume| volume.id == *volume_id)?,
+        discovery
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == *endpoint_id)?,
+    ))
+}
+
+fn remember_verified_resources(
+    state_store: &ProvisioningStateStore,
+    plan: &ProvisioningPlan,
+    volume: &NetworkVolume,
+    endpoint: &Endpoint,
+) -> Result<(), String> {
+    // Rediscovery is read-only at RunPod. Saving the IDs locally repairs stale
+    // state after reinstall or manual provider changes and prevents the setup
+    // UI from pretending valid infrastructure is incomplete after restart.
+    let mut remembered = state_store.load()?;
+    remembered.schema_version = 1;
+    remembered.network_volume_id = Some(volume.id.clone());
+    remembered.network_volume_name = Some(volume.name.clone());
+    remembered.network_volume_size_gb = Some(volume.size);
+    remembered.data_center_id = Some(volume.data_center.clone());
+    remembered.image_endpoint_id = Some(endpoint.id.clone());
+    remembered.image_endpoint_name = Some(endpoint.name.clone());
+    remembered.gpu_type_id = Some(plan.selected_gpu.type_id.clone());
+    remembered.gpu_pool_id = Some(plan.selected_gpu.pool_id.clone());
+    remembered.worker_image = Some(String::from(FLUX_WORKER_IMAGE));
+    remembered.serverless_usd_per_hour = plan.selected_gpu.serverless_usd_per_hour;
+    remembered.last_verified_unix = Some(now_unix()?);
+    state_store.save(&remembered)
+}
+
 // No `Debug`: commands temporarily carry the RunPod key across the channel.
 #[derive(Clone)]
 pub enum InfrastructureCommand {
-    Validate {
+    RunPreflight {
         api_key: String,
     },
-    DiscoverAndPlan {
-        api_key: String,
+    PlanInfrastructure {
         policy: GpuPolicy,
         volume_size_gb: u32,
     },
@@ -586,8 +660,14 @@ pub enum InfrastructureCommand {
 
 #[derive(Debug, Clone)]
 pub enum InfrastructureEvent {
-    Connected,
+    PreflightFinished {
+        report: PreflightReport,
+        infrastructure_ready: bool,
+        ready_volume: Option<NetworkVolume>,
+        ready_endpoint: Option<Endpoint>,
+    },
     PlanReady(ProvisioningPlan),
+    Progress(String),
     Applied(ProvisioningResult),
     Failed(String),
 }
@@ -600,6 +680,8 @@ pub struct InfrastructureWorker {
 impl InfrastructureWorker {
     pub fn start(
         state_store: ProvisioningStateStore,
+        paths: PortalPaths,
+        store: NexusStore,
         on_event: impl Fn(InfrastructureEvent) + Send + 'static,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
@@ -610,26 +692,46 @@ impl InfrastructureWorker {
         // proves Apply can only follow an explicit, successfully shown plan.
         thread::spawn(move || {
             let mut latest_plan: Option<ProvisioningPlan> = None;
+            let mut latest_discovery: Option<ProvisioningDiscovery> = None;
             while let Ok(command) = receiver.recv() {
                 match command {
-                    InfrastructureCommand::Validate { api_key } => {
-                        let result = RunPodInfrastructureClient::new(api_key)
-                            .and_then(|client| client.validate_api_key());
-                        match result {
-                            Ok(()) => on_event(InfrastructureEvent::Connected),
-                            Err(error) => on_event(InfrastructureEvent::Failed(error)),
+                    InfrastructureCommand::RunPreflight { api_key } => {
+                        latest_plan = None;
+                        let outcome = run_preflight(&paths, &store, &api_key);
+                        let mut ready_volume = None;
+                        let mut ready_endpoint = None;
+                        if let Some(discovery) = outcome.discovery.as_ref()
+                            && let Ok(remembered) = state_store.load()
+                            && let Ok(plan) =
+                                build_plan(discovery, &remembered, GpuPolicy::Balanced, 150)
+                            && let Some((volume, endpoint)) = reusable_resources(&plan, discovery)
+                            && remember_verified_resources(&state_store, &plan, volume, endpoint)
+                                .is_ok()
+                        {
+                            ready_volume = Some(volume.clone());
+                            ready_endpoint = Some(endpoint.clone());
                         }
+                        latest_discovery = outcome.discovery;
+                        on_event(InfrastructureEvent::PreflightFinished {
+                            report: outcome.report,
+                            infrastructure_ready: ready_endpoint.is_some(),
+                            ready_volume,
+                            ready_endpoint,
+                        });
                     }
-                    InfrastructureCommand::DiscoverAndPlan {
-                        api_key,
+                    InfrastructureCommand::PlanInfrastructure {
                         policy,
                         volume_size_gb,
                     } => {
-                        let result = RunPodInfrastructureClient::new(api_key).and_then(|client| {
-                            let discovery = discover(&client)?;
+                        let result = (|| {
+                            let discovery = latest_discovery.as_ref().ok_or_else(|| {
+                                String::from(
+                                    "Run Preflight successfully before planning infrastructure.",
+                                )
+                            })?;
                             let remembered = state_store.load()?;
-                            build_plan(&discovery, &remembered, policy, volume_size_gb)
-                        });
+                            build_plan(discovery, &remembered, policy, volume_size_gb)
+                        })();
                         match result {
                             Ok(plan) => {
                                 latest_plan = Some(plan.clone());
@@ -648,14 +750,40 @@ impl InfrastructureWorker {
                             })
                             .and_then(|plan| {
                                 let client = RunPodInfrastructureClient::new(api_key)?;
-                                apply_plan(&client, &state_store, plan)
+                                apply_plan_with_progress(&client, &state_store, plan, |message| {
+                                    on_event(InfrastructureEvent::Progress(message));
+                                })
                             });
                         match result {
                             Ok(result) => {
                                 latest_plan = None;
+                                if let Some(discovery) = latest_discovery.as_mut() {
+                                    discovery.volumes.retain(|volume| {
+                                        volume.id != result.network_volume.id
+                                            && volume.name != result.network_volume.name
+                                    });
+                                    discovery.volumes.push(result.network_volume.clone());
+                                    discovery.endpoints.retain(|endpoint| {
+                                        endpoint.id != result.image_endpoint.id
+                                            && endpoint.name != result.image_endpoint.name
+                                    });
+                                    discovery.endpoints.push(result.image_endpoint.clone());
+                                }
                                 on_event(InfrastructureEvent::Applied(result));
                             }
-                            Err(error) => on_event(InfrastructureEvent::Failed(error)),
+                            Err(error) => {
+                                // The provider may have completed an early
+                                // durable stage (most importantly volume
+                                // creation). The old discovery snapshot cannot
+                                // see that resource, so it must never be reused
+                                // to plan a retry. A fresh preflight will find
+                                // the saved/name-matched volume and reuse it.
+                                latest_plan = None;
+                                latest_discovery = None;
+                                on_event(InfrastructureEvent::Failed(format!(
+                                    "{error} Run Preflight again before retrying so Nexus can rediscover every durable resource."
+                                )));
+                            }
                         }
                     }
                 }
@@ -751,7 +879,10 @@ mod tests {
             plan.actions[1],
             ProvisioningAction::CreateImageEndpoint
         ));
-        assert!(plan.cost_note.contains("Serverless rate is not exposed"));
+        assert!(
+            plan.cost_note
+                .contains("Serverless live rate is unavailable")
+        );
         assert_eq!(plan.selected_gpu.serverless_usd_per_hour, None);
         assert_eq!(plan.selected_gpu.secure_pod_reference_usd_per_hour, 0.8);
     }
@@ -815,6 +946,37 @@ mod tests {
             &plan.actions[1],
             ProvisioningAction::ReuseImageEndpoint { id, .. } if id == "endpoint-live"
         ));
+    }
+
+    #[test]
+    fn restart_rediscovery_repairs_stale_durable_ids() {
+        let directory = tempfile::tempdir().expect("temporary directory should exist");
+        let state_store = ProvisioningStateStore::new(directory.path().join("infra.toml"));
+        state_store
+            .save(&ProvisioningState {
+                schema_version: 1,
+                network_volume_id: Some(String::from("deleted-volume")),
+                image_endpoint_id: Some(String::from("deleted-endpoint")),
+                ..ProvisioningState::default()
+            })
+            .expect("stale state should save");
+        let mut found = discovery();
+        found.volumes.push(volume());
+        found.endpoints.push(endpoint("volume-live"));
+        let plan = build_plan(
+            &found,
+            &state_store.load().expect("state should load"),
+            GpuPolicy::Balanced,
+            150,
+        )
+        .expect("rediscovered resources should plan");
+        let (volume, endpoint) = reusable_resources(&plan, &found)
+            .expect("matching resources should be recognized as ready");
+        remember_verified_resources(&state_store, &plan, volume, endpoint)
+            .expect("rediscovered identity should persist");
+        let repaired = state_store.load().expect("repaired state should load");
+        assert_eq!(repaired.network_volume_id.as_deref(), Some("volume-live"));
+        assert_eq!(repaired.image_endpoint_id.as_deref(), Some("endpoint-live"));
     }
 
     #[test]
