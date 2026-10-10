@@ -1,5 +1,5 @@
+mod app_catalog;
 mod app_state;
-mod branding;
 mod generation;
 mod media_library;
 mod model_catalog;
@@ -34,13 +34,17 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Catalog validation checks the source-controlled app inventory before UI
+    // construction. A bad storage ID or duplicate navigation mapping therefore
+    // fails visibly instead of creating or selecting the wrong app directory.
+    app_catalog::validate_catalog()?;
+
     // `?` unwraps the successful `MainWindow` or returns its `PlatformError`
     // from `main` immediately. That keeps startup failure handling explicit
     // without a panic.
     let window = MainWindow::new()?;
 
-    window.set_nexus_display_name(branding::NEXUS_DISPLAY_NAME.into());
-    window.set_nexus_subtitle(branding::NEXUS_SUBTITLE.into());
+    setup_app_catalog(&window);
 
     // Slint callbacks are retained by the window and all need access to the
     // same state. `Rc` provides shared ownership on this single UI thread,
@@ -70,6 +74,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(window.run()?)
+}
+
+fn setup_app_catalog(window: &MainWindow) {
+    // Slint models own UI-facing values, so these small strings are copied out
+    // of Rust's static catalog. The authoritative identities and navigation
+    // indices remain the typed Rust values in `app_catalog.rs`.
+    window.set_portal_apps(ModelRc::new(VecModel::from(portal_app_items())));
+    window.set_active_app(app_catalog::PortalAppId::Nexus.navigation_index());
+    window.set_portal_version(env!("CARGO_PKG_VERSION").into());
+
+    let nexus = app_catalog::descriptor(app_catalog::PortalAppId::Nexus);
+    window.set_nexus_display_name(nexus.display_name.into());
+    window.set_nexus_subtitle(nexus.subtitle.into());
+}
+
+fn portal_app_items() -> Vec<PortalAppListItem> {
+    app_catalog::PORTAL_APPS
+        .iter()
+        .map(|app| PortalAppListItem {
+            navigation_index: app.id.navigation_index(),
+            display_name: app.display_name.into(),
+        })
+        .collect()
 }
 
 fn setup_create_project(window: &MainWindow, state: Rc<RefCell<AppState>>) {
@@ -423,4 +450,25 @@ fn clear_generation_preview(window: &MainWindow) {
     window.set_generation_resolution(String::new().into());
     window.set_generation_seed(String::new().into());
     window.set_generation_error(String::new().into());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_catalog_converts_to_the_sidebar_model_in_stable_order() {
+        let items = portal_app_items();
+        let names = items
+            .iter()
+            .map(|item| item.display_name.as_str())
+            .collect::<Vec<_>>();
+        let indices = items
+            .iter()
+            .map(|item| item.navigation_index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["Home", "Nexus", "Compute", "Settings"]);
+        assert_eq!(indices, [0, 1, 2, 3]);
+    }
 }

@@ -152,7 +152,7 @@ impl PortalPaths {
     }
 }
 
-fn validate_app_id(app_id: &str) -> Result<(), String> {
+pub(crate) fn validate_app_id(app_id: &str) -> Result<(), String> {
     // A deliberately small identifier alphabet produces readable directories
     // and rejects separators, absolute paths, `.` and `..` before `join` can
     // interpret them as filesystem navigation.

@@ -5,7 +5,17 @@ Priorities:
 - Avoid unnecessary abstractions, frameworks, traits, generics, or indirection.
 - Prefer readable concrete Rust code.
 - Preserve the existing Project -> Shot architecture.
-- Do not introduce SQLite, async runtimes, plugin systems, or microservices unless explicitly requested.
+- Preserve Portal's compile-time internal-app architecture; do not introduce a plugin system unless explicitly requested.
+- Do not introduce additional databases or storage engines without explicit need.
+- Reuse `NexusStore` and the existing SQLite architecture for Nexus-owned relational data.
+- New persistent apps should normally own storage under `portaldata/apps/<app-id>` through `PortalPaths::app_dir(...)`.
+- Do not introduce async runtimes or microservices unless explicitly requested.
+
+Canonical context:
+- Before substantial Portal changes, read `PORTAL_CONTEXT.md`.
+- Before adding an internal app, also read `docs/APP_DEVELOPMENT_GUIDE.md`.
+- Source code remains authoritative when documentation disagrees.
+- When a change materially alters architecture, app inventory, storage, capabilities, worker contracts, external integrations, or security boundaries, update `PORTAL_CONTEXT.md` in the same pull request.
 
 Educational comments:
 - Comment non-trivial Rust code extensively.
@@ -57,7 +67,8 @@ Git workflow:
 - If a task makes no file changes, do not create an empty commit.
 
 Portal-specific:
-- portal-app owns UI, project data, canon, shots, and orchestration.
+- portal-app owns the shell, compile-time app catalog, UI, Project -> Shot data, Nexus SQLite/media, generation jobs, and provider orchestration.
+- Portal internal apps are explicit source-controlled modules and pages, not dynamically loaded plugins.
 - portal-comfy-worker is a dumb compute worker.
 - portal-llm-worker is a scene/prompt compiler, not the source of truth.
 - portaldata contains local runtime data and models and is not committed to Git.
