@@ -8,6 +8,7 @@ export struct CharacterListItem { id: string, name: string, description: string,
 export struct MediaListItem { id: string, kind: string, path: string, details: string, preview: image, job-status: string, prompt-summary: string }
 export struct JobListItem { id: string, status: string, model: string, details: string }
 export struct DiagnosticListItem { status: string, name: string, summary: string, detail: string }
+export struct PortalAppListItem { navigation-index: int, display-name: string }
 
 component Heading inherits Text { color: #f5f6f8; font-size: 28px; font-weight: 700; }
 component Label inherits Text { color: #9da5b1; font-size: 12px; }
@@ -41,6 +42,8 @@ export component MainWindow inherits Window {
     callback open-data-folder();
 
     in-out property <int> active-app: 1;
+    in-out property <[PortalAppListItem]> portal-apps: [];
+    in-out property <string> portal-version: "";
     in-out property <int> nexus-tab: 0;
     in-out property <string> nexus-display-name: "";
     in-out property <string> nexus-subtitle: "";
@@ -143,12 +146,12 @@ export component MainWindow inherits Window {
                 Text { text: "PORTAL"; color: #f5f6f8; font-size: 24px; font-weight: 700; }
                 Label { text: "Desktop workspace"; }
                 Rectangle { height: 14px; }
-                Button { text: "Home"; clicked => { root.active-app = 0; } }
-                Button { text: root.nexus-display-name; clicked => { root.active-app = 1; } }
-                Button { text: "Compute"; clicked => { root.active-app = 2; } }
-                Button { text: "Settings"; clicked => { root.active-app = 3; } }
+                for app in root.portal-apps: Button {
+                    text: app.display-name;
+                    clicked => { root.active-app = app.navigation-index; }
+                }
                 Rectangle { vertical-stretch: 1; }
-                Text { text: "Portal 0.7.0"; color: #737b87; font-size: 11px; }
+                Text { text: "Portal " + root.portal-version; color: #737b87; font-size: 11px; }
             }
         }
 
